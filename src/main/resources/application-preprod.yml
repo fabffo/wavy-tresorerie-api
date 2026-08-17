@@ -1,0 +1,9 @@
+spring:
+  config.activate.on-profile: preprod
+  jpa.hibernate.ddl-auto: validate
+  flyway:
+    enabled: true
+    clean-disabled: true
+    validate-on-migrate: true
+management.endpoints.web.exposure.include: health,info,metrics
+management.endpoint.health.show-details: never

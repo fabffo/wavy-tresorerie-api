@@ -1,0 +1,8 @@
+spring:
+  config:
+    activate:
+      on-profile: recette
+  datasource:
+    url: jdbc:postgresql://${WAVY_TRESORERIE_DB_HOST:tresorerie-db-recette}:${WAVY_TRESORERIE_DB_PORT:5432}/${WAVY_TRESORERIE_DB_NAME:wavy_tresorerie_db}
+    username: ${WAVY_TRESORERIE_DB_USER:tresorerie_user}
+    password: ${WAVY_TRESORERIE_DB_PASSWORD:motdepasse_recette}
