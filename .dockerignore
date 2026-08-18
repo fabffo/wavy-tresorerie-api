@@ -1,0 +1,11 @@
+target
+.git
+.gitignore
+.idea
+.vscode
+.codex
+*.iml
+*.log
+.env
+.env.*
+test-results
