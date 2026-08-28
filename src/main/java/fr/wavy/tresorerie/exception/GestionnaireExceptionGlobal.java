@@ -39,6 +39,12 @@ public class GestionnaireExceptionGlobal {
         return ResponseEntity.badRequest().body(erreur("VALIDATION", message));
     }
 
+    @ExceptionHandler(ErreurInterserviceException.class)
+    public ResponseEntity<ApiErreur> gererErreurInterservice(ErreurInterserviceException exception) {
+        return ResponseEntity.status(exception.getStatut())
+                .body(erreur("ERREUR_INTERSERVICE", exception.getMessage()));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErreur> gererErreurTechnique(Exception exception) {
         LOGGER.error("Erreur technique non geree", exception);
