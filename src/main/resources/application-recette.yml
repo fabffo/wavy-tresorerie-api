@@ -4,5 +4,28 @@ spring:
       on-profile: recette
   datasource:
     url: jdbc:postgresql://${WAVY_TRESORERIE_DB_HOST:tresorerie-db-recette}:${WAVY_TRESORERIE_DB_PORT:5432}/${WAVY_TRESORERIE_DB_NAME:wavy_tresorerie_db}
-    username: ${WAVY_TRESORERIE_DB_USER:tresorerie_user}
-    password: ${WAVY_TRESORERIE_DB_PASSWORD:motdepasse_recette}
+    username: ${WAVY_TRESORERIE_DB_USER}
+    password: ${WAVY_TRESORERIE_DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  sql:
+    init:
+      mode: never
+  flyway:
+    enabled: true
+    validate-on-migrate: true
+    clean-disabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+wavy:
+  socle:
+    api-url: ${WAVY_SOCLE_API_URL:http://wavy-socle-api-recette:8080}
