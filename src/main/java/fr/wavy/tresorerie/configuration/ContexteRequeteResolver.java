@@ -3,8 +3,6 @@ package fr.wavy.tresorerie.configuration;
 import java.util.Arrays;
 import java.util.List;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import fr.wavy.tresorerie.exception.RegleMetierException;
@@ -13,10 +11,7 @@ import jakarta.servlet.http.HttpServletRequest;
 @Component
 public class ContexteRequeteResolver {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(ContexteRequeteResolver.class);
-
     public ContexteRequete resoudre(HttpServletRequest request) {
-        logHeaders(request);
         return new ContexteRequete(
                 lireHeaderLong(request, "X-Tenant-Id"),
                 lireHeaderLong(request, "X-Utilisateur-Id"),
@@ -61,18 +56,4 @@ public class ContexteRequeteResolver {
         return null;
     }
 
-    private void logHeaders(HttpServletRequest request) {
-        LOGGER.info("Contexte Tresorerie headers: method={}, uri={}, origin={}, tenant={}, societe={}, utilisateur={}, email={}, roles={}, legacyRoles={}, cookiePresent={}, authorizationPresent={}",
-                request.getMethod(),
-                request.getRequestURI(),
-                request.getHeader("Origin"),
-                request.getHeader("X-Tenant-Id"),
-                request.getHeader("X-Societe-Courante-Id"),
-                request.getHeader("X-Utilisateur-Id"),
-                request.getHeader("X-Wavy-Email"),
-                request.getHeader("X-Wavy-Roles"),
-                request.getHeader("X-Roles"),
-                request.getHeader("Cookie") != null,
-                request.getHeader("Authorization") != null);
-    }
 }

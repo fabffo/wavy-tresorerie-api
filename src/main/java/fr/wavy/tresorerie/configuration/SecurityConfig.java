@@ -5,6 +5,7 @@ import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.slf4j.Logger;
@@ -14,6 +15,8 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.AnonymousAuthenticationFilter;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -30,7 +33,8 @@ public class SecurityConfig {
     }
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    @Profile("!secure & !production")
+    public SecurityFilterChain localSecurityFilterChain(HttpSecurity http) throws Exception {
         return http
                 .cors(Customizer.withDefaults())
                 .csrf(AbstractHttpConfigurer::disable)
@@ -39,6 +43,32 @@ public class SecurityConfig {
                         .anyRequest().permitAll()
                 )
                 .build();
+    }
+
+    @Bean
+    @Profile({"secure", "production"})
+    public SecurityFilterChain secureSecurityFilterChain(HttpSecurity http,
+            ContexteAuthentificationFilter contexteAuthentificationFilter) throws Exception {
+        return http
+                .cors(Customizer.withDefaults())
+                .csrf(AbstractHttpConfigurer::disable)
+                .authorizeHttpRequests(authorize -> authorize
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        .requestMatchers("/actuator/health", "/actuator/info").permitAll()
+                        .requestMatchers("/actuator/**").denyAll()
+                        .anyRequest().authenticated()
+                )
+                .addFilterBefore(contexteAuthentificationFilter, AnonymousAuthenticationFilter.class)
+                .build();
+    }
+
+    @Bean
+    @Profile({"secure", "production"})
+    public FilterRegistrationBean<ContexteAuthentificationFilter> disableServletRegistration(
+            ContexteAuthentificationFilter filter) {
+        FilterRegistrationBean<ContexteAuthentificationFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
     }
 
     @Bean
