@@ -6,6 +6,8 @@ RUN mvn -q -DskipTests package
 
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
-COPY --from=build /workspace/target/wavy-tresorerie-api-0.0.1-SNAPSHOT.jar app.jar
+RUN addgroup -S wavy && adduser -S -G wavy wavy
+COPY --from=build --chown=wavy:wavy /workspace/target/*.jar app.jar
+USER wavy
 EXPOSE 8086
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
