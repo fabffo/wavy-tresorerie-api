@@ -3,6 +3,8 @@ package fr.wavy.tresorerie.configuration;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.List;
@@ -13,7 +15,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.env.Environment;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -28,7 +32,15 @@ import fr.wavy.tresorerie.service.TresorerieService;
 @WebMvcTest(controllers = TresorerieControleur.class)
 @Import({SecurityConfig.class, ContexteAuthentificationFilter.class})
 @ActiveProfiles("recette")
+@TestPropertySource(properties =
+        "wavy.cors.allowed-origin-patterns=http://localhost:24200,http://localhost:24201,http://localhost:24202,http://localhost:24203,http://localhost:24204,http://localhost:24206,http://localhost:24207")
 class SecuriteRecetteTest {
+
+    @Test
+    void origineGlobaleAvecCredentialsEstRefusee() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new SecurityConfig("*"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
     @Autowired MockMvc mockMvc;
     @Autowired Environment environment;
     @Autowired ContexteAuthentificationFilter contexteAuthentificationFilter;
@@ -70,6 +82,30 @@ class SecuriteRecetteTest {
     void identiteEtContexteCoherentsSontAcceptes() throws Exception {
         mockMvc.perform(requeteMetier(3, 7, 11).header("Authorization", "Bearer jeton-test"))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    void preflightPutDepuisErpShellRecetteEstAccepte() throws Exception {
+        mockMvc.perform(options("/api/tresorerie/comptes-bancaires/1")
+                        .header(HttpHeaders.ORIGIN, "http://localhost:24207")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS,
+                                "Authorization,Content-Type,X-Tenant-Id,X-Utilisateur-Id,X-Societe-Courante-Id,X-Wavy-Email,X-Wavy-Roles,X-Roles"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "http://localhost:24207"))
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true"))
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS,
+                        "GET,POST,PUT,PATCH,DELETE,OPTIONS"))
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS, "Set-Cookie"));
+    }
+
+    @Test
+    void preflightDepuisUneOrigineNonAutoriseeEstRefuse() throws Exception {
+        mockMvc.perform(options("/api/tresorerie/comptes-bancaires/1")
+                        .header(HttpHeaders.ORIGIN, "http://localhost:29999")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PUT"))
+                .andExpect(status().isForbidden())
+                .andExpect(header().doesNotExist(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN));
     }
 
     @Test

@@ -26,10 +26,16 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 public class SecurityConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger(SecurityConfig.class);
 
-    private final String allowedOriginPatterns;
+    private final List<String> allowedOriginPatterns;
 
     public SecurityConfig(@Value("${wavy.cors.allowed-origin-patterns:}") String allowedOriginPatterns) {
-        this.allowedOriginPatterns = allowedOriginPatterns;
+        this.allowedOriginPatterns = java.util.Arrays.stream(allowedOriginPatterns.split(","))
+                .map(String::trim)
+                .filter(pattern -> !pattern.isBlank())
+                .toList();
+        if (this.allowedOriginPatterns.contains("*")) {
+            throw new IllegalArgumentException("wavy.cors.allowed-origin-patterns ne doit pas contenir l'origine globale '*'.");
+        }
     }
 
     @Bean
@@ -79,12 +85,8 @@ public class SecurityConfig {
                 "http://localhost:14206",
                 "http://localhost:24206"
         ));
-        List<String> patterns = java.util.Arrays.stream(allowedOriginPatterns.split(","))
-                .map(String::trim)
-                .filter(pattern -> !pattern.isBlank())
-                .toList();
-        if (!patterns.isEmpty()) {
-            configuration.setAllowedOriginPatterns(patterns);
+        if (!allowedOriginPatterns.isEmpty()) {
+            configuration.setAllowedOriginPatterns(allowedOriginPatterns);
         }
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of(
@@ -97,6 +99,7 @@ public class SecurityConfig {
                 "X-Wavy-Roles",
                 "X-Wavy-Email"
         ));
+        configuration.setExposedHeaders(List.of(HttpHeaders.SET_COOKIE));
         configuration.setAllowCredentials(true);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
