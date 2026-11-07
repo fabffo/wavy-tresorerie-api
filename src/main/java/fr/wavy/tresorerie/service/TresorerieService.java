@@ -118,6 +118,9 @@ public class TresorerieService {
     private final RegleRapprochementBancaireRepository regleRepository;
     private final FacturesTresorerieClient facturesClient;
     private final TiersTresorerieClient tiersClient;
+    @jakarta.persistence.PersistenceContext
+    private jakarta.persistence.EntityManager entityManager;
+    private final PaiementAchatRapprochementService paiementsAchats;
     private final TresorerieMapper mapper;
     private final ImportReleveBancaireService importReleveService;
     private final PeriodeSalaireService periodeSalaireService = new PeriodeSalaireService();
@@ -135,8 +138,10 @@ public class TresorerieService {
             TiersTresorerieClient tiersClient,
             TresorerieMapper mapper,
             ImportReleveBancaireService importReleveService,
-            ClassificationOperationBancaireService classificationService
+            ClassificationOperationBancaireService classificationService,
+            PaiementAchatRapprochementService paiementsAchats
     ) {
+        this.paiementsAchats = paiementsAchats;
         this.compteRepository = compteRepository;
         this.operationRepository = operationRepository;
         this.pieceRapprochementRepository = pieceRapprochementRepository;
@@ -273,12 +278,15 @@ public class TresorerieService {
 
     public void supprimerOperation(ContexteRequete contexte, Long id) {
         OperationBancaire operation = trouverOperationActive(contexte, id);
+        verifierOperationModifiable(operation);
+        verifierOperationModifiable(operation);
         operation.setActif(false);
         operation.setDateModification(LocalDateTime.now());
     }
 
     public OperationBancaireReponse modifierClassificationOperation(ContexteRequete contexte, Long id, ClassificationOperationDemande demande) {
         OperationBancaire operation = trouverOperationActive(contexte, id);
+        verifierOperationModifiable(operation);
         operation.setNatureOperation(demande.natureOperation());
         operation.setStatutClassification(StatutClassificationOperation.CLASSEE_MANUELLE);
         operation.setDateModification(LocalDateTime.now());
@@ -287,6 +295,7 @@ public class TresorerieService {
 
     public OperationBancaireReponse retraiterOperation(ContexteRequete contexte, Long id) {
         OperationBancaire operation = trouverOperationActive(contexte, id);
+        verifierOperationModifiable(operation);
         classificationService.classerAutomatiquement(operation, reglesClassification(contexte));
         operation.setDateModification(LocalDateTime.now());
         return mapper.versReponse(operation, autorisationFactureRapprochement(operation, autorisationsFactureRapprochement(contexte)));
@@ -301,6 +310,7 @@ public class TresorerieService {
                 contexte.tenantId(), contexte.societeCouranteId(), StatutOperationBancaire.NON_RAPPROCHEE);
         List<RegleClassificationOperation> regles = reglesReconnaissanceTiersOperationBancaire(contexte);
         operations.forEach(operation -> {
+            verifierOperationModifiable(operation);
             ResultatReconnaissanceTiers resultat = classificationService.reconnaitreTiersDepuisRegles(operation.getLibelle(), regles);
             if (resultat.trouve()) {
                 operation.setTiersId(resultat.tiersId());
@@ -386,6 +396,8 @@ public class TresorerieService {
         if (typeFacture == TypeFactureRapprochement.SALAIRE) {
             return rapprocherSalaire(contexte, operation, individuel);
         }
+        if (typeFacture == TypeFactureRapprochement.ACHAT && reprendrePaiementsEngages(contexte, operation))
+            return new ResultatRapprochementOperation(1, 0, 0, List.of("Paiement repris sans doublon."));
         List<FactureOuverteRapprochementDto> factures = facturesClient.listerFacturesOuvertes(contexte, typeFacture, operation.getTiersId());
         BigDecimal montant = montantOperation(operation);
         MatchFacture meilleur = factures.stream()
@@ -458,6 +470,8 @@ public class TresorerieService {
         if (!operationEligibleRapprochementNoteFrais(operation)) {
             return new ResultatRapprochementOperation(0, 0, 1, List.of("Operation %s non eligible au rapprochement note de frais.".formatted(operation.getId())));
         }
+        if (reprendrePaiementsEngages(contexte, operation))
+            return new ResultatRapprochementOperation(1, 0, 0, List.of("Remboursement repris sans doublon."));
         BigDecimal montant = montantOperation(operation);
         FactureOuverteRapprochementDto facture = facturesClient.listerFacturesAchatNotesFraisOuvertes(contexte, operation.getTiersId(), montant)
                 .stream()
@@ -481,7 +495,14 @@ public class TresorerieService {
 
     public OperationBancaireReponse creerPieceRapprochement(ContexteRequete contexte, Long id) {
         OperationBancaire operation = trouverOperationActive(contexte, id);
+        entityManager.refresh(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
         verifierOperationEligiblePieceRapprochement(operation);
+        if (rapprochementRepository.findByOperationBancaireIdAndStatut(id, StatutRapprochement.PROPOSE).stream()
+                .anyMatch(r -> r.getTypeFacture() == TypeFactureRapprochement.ACHAT))
+            throw new RegleMetierException("RAPPROCHEMENT_EXISTANT", "Une proposition achat existe : la valider ou l'annuler avant de créer une autre pièce.");
+        if (PaiementAchatRapprochementService.remboursement(operation)
+                && !paiementsAchats.candidates(contexte, operation).isEmpty())
+            throw new RegleMetierException("REMBOURSEMENT_REEL_EXISTANT", "Une facture de remboursement existe : la rapprocher en priorité.");
         if (operationEligibleRapprochementSalaire(operation)) {
             YearMonth periode = periodeSalaireOperation(operation.getDateOperation());
             if (!facturesClient.listerSalairesOuverts(contexte, operation.getTiersId(),
@@ -647,6 +668,7 @@ public class TresorerieService {
                 contexte.tenantId(), contexte.societeCouranteId(), importReleve.getId());
         List<RegleClassificationOperation> regles = reglesClassification(contexte);
         operations.forEach(operation -> {
+            verifierOperationModifiable(operation);
             classificationService.classerAutomatiquement(operation, regles);
             operation.setDateModification(LocalDateTime.now());
         });
@@ -692,6 +714,18 @@ public class TresorerieService {
     }
 
     public RapprochementBancaireReponse creerRapprochement(ContexteRequete contexte, RapprochementBancaireDemande demande) {
+        OperationBancaire operation = trouverOperationActive(contexte, demande.operationBancaireId());
+        if (demande.typeFacture() == TypeFactureRapprochement.ACHAT
+                || (operation.getSens() == SensOperation.DEBIT && !operationEligibleRapprochementSalaire(operation))) {
+            if (demande.typeFacture() != TypeFactureRapprochement.ACHAT || demande.factureId() == null
+                    || (demande.statut() != null && demande.statut() != StatutRapprochement.PROPOSE && demande.statut() != StatutRapprochement.VALIDE))
+                throw new RegleMetierException("RAPPROCHEMENT_ACHAT_INVALIDE", "Une facture d'achat et un statut proposé ou validé sont obligatoires.");
+            Long id = paiementsAchats.preparer(contexte, operation.getId(), demande.factureId(), demande.montantRapproche(),
+                    100, libelleRapprochement(operation, String.valueOf(demande.factureId())), "MANUEL");
+            if (demande.statut() == StatutRapprochement.VALIDE) paiementsAchats.valider(contexte, id);
+            entityManager.refresh(operation);
+            return mapper.versReponse(trouverRapprochement(contexte, id));
+        }
         RapprochementBancaire rapprochement = new RapprochementBancaire();
         rapprochement.setTenantId(contexte.tenantId());
         rapprochement.setSocieteInterneId(contexte.societeCouranteId());
@@ -710,7 +744,8 @@ public class TresorerieService {
         Set<Long> facturesDejaUtilisees = rapprochementRepository
                 .findByOperationBancaireIdAndStatut(operationId, StatutRapprochement.VALIDE).stream()
                 .map(RapprochementBancaire::getFactureId).filter(java.util.Objects::nonNull).collect(Collectors.toSet());
-        return facturesClient.listerFacturesOuvertes(contexte, typeFacture, operation.getTiersId()).stream()
+        return (typeFacture == TypeFactureRapprochement.ACHAT ? paiementsAchats.candidates(contexte, operation)
+                : facturesClient.listerFacturesOuvertes(contexte, typeFacture, operation.getTiersId())).stream()
                 .filter(facture -> facture.resteAPayer() != null && facture.resteAPayer().compareTo(BigDecimal.ZERO) > 0)
                 .filter(facture -> !facturesDejaUtilisees.contains(facture.id()))
                 .toList();
@@ -734,6 +769,21 @@ public class TresorerieService {
             throw new RegleMetierException("TYPE_FACTURE_INVALIDE", "Le type de facture ne correspond pas au sens et au tiers de l'operation.");
         }
 
+        if (typeAttendu == TypeFactureRapprochement.ACHAT) {
+            BigDecimal totalDemande = lignes.stream().map(LigneRapprochementManuelDemande::montantRapproche).reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal dejaValide = rapprochementRepository.sommeMontantParOperationEtStatut(operationId, StatutRapprochement.VALIDE);
+            // Une demande relancée avec des lignes déjà validées est refusée, sans nouveau paiement.
+            if (totalDemande.add(dejaValide).compareTo(montantOperation(operation)) > 0)
+                throw new RegleMetierException("MONTANT_SUPERIEUR_OPERATION", "Le total dépasse le montant bancaire.");
+            List<Long> ids = new ArrayList<>();
+            for (var ligne : lignes) ids.add(paiementsAchats.preparer(contexte, operationId, ligne.factureId(), ligne.montantRapproche(),
+                    100, libelleRapprochement(operation, String.valueOf(ligne.factureId())), "MANUEL"));
+            for (Long id : ids) paiementsAchats.valider(contexte, id);
+            entityManager.refresh(operation);
+            BigDecimal total = rapprochementRepository.sommeMontantParOperationEtStatut(operationId, StatutRapprochement.VALIDE);
+            return new RapprochementManuelResultat(operationId, montantOperation(operation), total,
+                    montantOperation(operation).subtract(total), operation.getStatutRapprochement());
+        }
         Map<Long, FactureOuverteRapprochementDto> candidates = listerFacturesCandidates(contexte, operationId).stream()
                 .collect(Collectors.toMap(FactureOuverteRapprochementDto::id, Function.identity()));
         BigDecimal ajout = BigDecimal.ZERO;
@@ -778,6 +828,8 @@ public class TresorerieService {
     }
 
     private TypeFactureRapprochement typeFactureManuel(OperationBancaire operation) {
+        if (operation.getSens() == SensOperation.DEBIT && PaiementAchatRapprochementService.remboursement(operation))
+            return TypeFactureRapprochement.ACHAT;
         if (operation.getSens() == SensOperation.DEBIT
                 && (operation.getTypeTiersReconnu() == TypeTiersReconnu.FOURNISSEUR
                     || operation.getTypeTiersReconnu() == TypeTiersReconnu.FOURNISSEUR_SERVICE)) {
@@ -1097,6 +1149,22 @@ public class TresorerieService {
                 .orElseThrow(() -> new RessourceNonTrouveeException("Compte bancaire introuvable."));
     }
 
+    private void verifierOperationModifiable(OperationBancaire operation) {
+        entityManager.refresh(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+        if (operation.isRapprochee() || rapprochementRepository.findByOperationBancaireIdAndStatut(operation.getId(), StatutRapprochement.PROPOSE)
+                .stream().anyMatch(RapprochementBancaire::isPaiementEngage))
+            throw new RegleMetierException("OPERATION_PAIEMENT_ENGAGE", "L'opération rapprochée ou en cours de paiement ne peut pas être modifiée.");
+    }
+
+    private boolean reprendrePaiementsEngages(ContexteRequete contexte, OperationBancaire operation) {
+        var ids = rapprochementRepository.findByOperationBancaireIdAndStatut(operation.getId(), StatutRapprochement.PROPOSE).stream()
+                .filter(r -> r.getTypeFacture() == TypeFactureRapprochement.ACHAT && r.isPaiementEngage())
+                .map(RapprochementBancaire::getId).toList();
+        for (Long id : ids) paiementsAchats.valider(contexte, id);
+        if (!ids.isEmpty()) entityManager.refresh(operation);
+        return !ids.isEmpty();
+    }
+
     private boolean operationEligibleRapprochementFacture(OperationBancaire operation) {
         if (operation.isRapprochee() || operation.getStatutRapprochement() != StatutOperationBancaire.NON_RAPPROCHEE || operation.getTiersId() == null) {
             return false;
@@ -1105,7 +1173,8 @@ public class TresorerieService {
                 || (operation.getSens() == SensOperation.DEBIT && operation.getNatureOperation() == NatureOperationBancaire.FACTURE_FOURNISSEUR)
                 || (operation.getSens() == SensOperation.DEBIT
                     && operation.getNatureOperation() == NatureOperationBancaire.SALAIRE
-                    && operation.getTypeTiersReconnu() == TypeTiersReconnu.SALARIE);
+                    && operation.getTypeTiersReconnu() == TypeTiersReconnu.SALARIE
+                    && !PaiementAchatRapprochementService.remboursement(operation));
     }
 
     private boolean operationEligibleRapprochementSalaire(OperationBancaire operation) {
@@ -1113,6 +1182,7 @@ public class TresorerieService {
                 && operation.getStatutRapprochement() == StatutOperationBancaire.NON_RAPPROCHEE
                 && operation.getSens() == SensOperation.DEBIT
                 && operation.getNatureOperation() == NatureOperationBancaire.SALAIRE
+                && !PaiementAchatRapprochementService.remboursement(operation)
                 && operation.getTypeTiersReconnu() == TypeTiersReconnu.SALARIE
                 && operation.getTiersId() != null;
     }
@@ -1138,11 +1208,7 @@ public class TresorerieService {
                 || operation.getSens() != SensOperation.DEBIT) {
             return false;
         }
-        String libelle = normaliserPourMatching(operation.getLibelle()).toUpperCase(Locale.ROOT);
-        return operation.getNatureOperation() == NatureOperationBancaire.NOTE_DE_FRAIS
-                || libelle.contains("NOTE FRAIS")
-                || libelle.contains("NDF")
-                || libelle.contains("REMBOURSEMENT");
+        return PaiementAchatRapprochementService.remboursement(operation);
     }
 
     private int score(OperationBancaire operation, FactureOuverteRapprochementDto facture, BigDecimal montantOperation) {
@@ -1211,6 +1277,14 @@ public class TresorerieService {
             boolean multi
     ) {
         String libelle = libelleRapprochement(operation, multi ? "MULTI" : factures.get(0).numeroFacture());
+        if (typeFacture == TypeFactureRapprochement.ACHAT) {
+            List<Long> ids = new ArrayList<>();
+            for (var facture : factures) ids.add(paiementsAchats.preparer(contexte, operation.getId(), facture.id(), facture.resteAPayer(),
+                    score, libelle, "RAPPROCHEMENT_FACTURES"));
+            for (Long id : ids) paiementsAchats.valider(contexte, id);
+            entityManager.refresh(operation);
+            return;
+        }
         for (FactureOuverteRapprochementDto facture : factures) {
             facturesClient.enregistrerPaiement(
                     contexte,
@@ -1231,7 +1305,15 @@ public class TresorerieService {
     }
 
     private void validerProposition(ContexteRequete contexte, RapprochementBancaire rapprochement) {
+        if (rapprochement.getTypeFacture() == TypeFactureRapprochement.ACHAT) {
+            paiementsAchats.valider(contexte, rapprochement.getId());
+            entityManager.refresh(rapprochement.getOperationBancaire()); entityManager.refresh(rapprochement);
+            return;
+        }
         verifierPropositionModifiable(rapprochement, "valider");
+        if (rapprochement.getTypeFacture() == TypeFactureRapprochement.SALAIRE
+                && PaiementAchatRapprochementService.remboursement(rapprochement.getOperationBancaire()))
+            throw new RegleMetierException("REMBOURSEMENT_NON_SALAIRE", "Un remboursement de frais ne peut pas payer un salaire.");
         Long documentId = rapprochement.getTypeFacture() == TypeFactureRapprochement.SALAIRE
                 ? rapprochement.getSalaireId() : rapprochement.getFactureId();
         if (documentId == null || rapprochement.getTypeFacture() == null) {
@@ -1274,6 +1356,9 @@ public class TresorerieService {
     }
 
     private void annulerProposition(ContexteRequete contexte, RapprochementBancaire rapprochement, String motif) {
+        if (rapprochement.getTypeFacture() == TypeFactureRapprochement.ACHAT) {
+            paiementsAchats.annuler(contexte, rapprochement.getId(), motif); entityManager.refresh(rapprochement); return;
+        }
         verifierPropositionModifiable(rapprochement, "annuler");
         LocalDateTime maintenant = LocalDateTime.now();
         rapprochement.setStatut(StatutRapprochement.ANNULE);
@@ -1283,6 +1368,8 @@ public class TresorerieService {
     }
 
     private void verifierPropositionModifiable(RapprochementBancaire rapprochement, String action) {
+        if ("annuler".equals(action) && rapprochement.isPaiementEngage())
+            throw new RegleMetierException("PAIEMENT_A_REPRENDRE", "Le paiement est engagé : reprendre sa validation avant toute autre action.");
         if (rapprochement.getStatut() != StatutRapprochement.PROPOSE) {
             String libelleAction = "valider".equals(action) ? "validee" : "annulee";
             throw new RegleMetierException("RAPPROCHEMENT_STATUT_INVALIDE",
@@ -1308,6 +1395,12 @@ public class TresorerieService {
             FactureOuverteRapprochementDto facture, BigDecimal montant, int score,
             StatutRapprochement statut, String libelle, String mode
     ) {
+        if (typeFacture == TypeFactureRapprochement.ACHAT) {
+            Long id = paiementsAchats.preparer(contexte, operation.getId(), facture.id(), montant, score, libelle, mode);
+            if (statut == StatutRapprochement.VALIDE) paiementsAchats.valider(contexte, id);
+            entityManager.refresh(operation);
+            return;
+        }
         RapprochementBancaire rapprochement = new RapprochementBancaire();
         rapprochement.setTenantId(contexte.tenantId());
         rapprochement.setSocieteInterneId(contexte.societeCouranteId());

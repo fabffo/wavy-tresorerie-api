@@ -46,8 +46,9 @@ public class ClassificationOperationBancaireService {
         if (texte.contains("TVA")) return NatureOperationBancaire.TVA;
         if (texte.contains("URSSAF")) return NatureOperationBancaire.URSSAF;
         if (contientUn(texte, "IMPOT", "DGFIP", " IS ", "PAS", "IMPOT SALAIRES")) return NatureOperationBancaire.IMPOT;
+        if (contientUn(texte, "NOTE FRAIS", "NOTE DE FRAIS", "NDF", "REMBOURSEMENT") && sens == SensOperation.DEBIT)
+            return NatureOperationBancaire.NOTE_DE_FRAIS;
         if (contientMotCleSalaire(texte) && sens == SensOperation.DEBIT) return NatureOperationBancaire.SALAIRE;
-        if (contientUn(texte, "NOTE FRAIS", "NDF") && sens == SensOperation.DEBIT) return NatureOperationBancaire.NOTE_DE_FRAIS;
         if (typeTiers == TypeTiersReconnu.SALARIE && sens == SensOperation.DEBIT) return NatureOperationBancaire.SALAIRE;
         if (contientUn(texte, "FRAIS", "COMMISSION", "COTISATION BANCAIRE")) return NatureOperationBancaire.FRAIS_BANCAIRES;
         if (contientUn(texte, "CAPITAL", "APPORT")) return NatureOperationBancaire.APPORT_CAPITAL;

@@ -17,6 +17,11 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "rapprochement_bancaire")
 public class RapprochementBancaire {
+    @Column(name = "paiement_engage", nullable = false)
+    private boolean paiementEngage;
+    public boolean isPaiementEngage() { return paiementEngage; }
+    public void setPaiementEngage(boolean valeur) { paiementEngage = valeur; }
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

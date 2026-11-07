@@ -17,6 +17,13 @@ class ClassificationOperationBancaireServiceTest {
     private final ClassificationOperationBancaireService service = new ClassificationOperationBancaireService();
 
     @Test
+    void remboursementSalarieNeDevientPasUnSalaire() {
+        OperationBancaire op = operation("REMBOURSEMENT NOTE DE FRAIS SALARIE", SensOperation.DEBIT);
+        op.setTypeTiersReconnu(TypeTiersReconnu.SALARIE);
+        assertThat(service.determinerNature(op)).isEqualTo(NatureOperationBancaire.NOTE_DE_FRAIS);
+    }
+
+    @Test
     void classeLesOperationsBancairesSelonLesReglesPrioritaires() {
         assertClassification("VIR LINKJOB FACTURE", SensOperation.DEBIT, NatureOperationBancaire.FACTURE_FOURNISSEUR, "LINKJOB", TypeTiersReconnu.FOURNISSEUR_SERVICE);
         assertClassification("VIR MARIF REGLEMENT", SensOperation.CREDIT, NatureOperationBancaire.FACTURE_CLIENT, "MARIF", TypeTiersReconnu.CLIENT);

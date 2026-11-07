@@ -81,6 +81,27 @@ class PropagationAuthentificationClientsTest {
                 .extracting("statut.value").isEqualTo(401);
     }
 
+    @Test
+    void remboursementTransmetSonTypeSansMontantVide() throws Exception {
+        AtomicReference<String> query = new AtomicReference<>();
+        String baseUrl = demarrer(exchange -> { query.set(exchange.getRequestURI().getRawQuery()); repondre(exchange, 200, "[]"); });
+        HttpFacturesTresorerieClient client = new HttpFacturesTresorerieClient(baseUrl, new AuthentificationSortante());
+        preparerRequeteEntrante();
+        client.listerFacturesAchatNotesFraisOuvertes(contexte(), 7L, null);
+        assertThat(query.get()).contains("typeFacture=ACHAT", "tiersId=7", "remboursementBeneficiaire=true").doesNotContain("montant");
+    }
+
+    @Test
+    void paiementTransmetLesReferencesDurables() throws Exception {
+        AtomicReference<String> corps = new AtomicReference<>();
+        String baseUrl = demarrer(exchange -> { corps.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)); repondre(exchange, 200, "{}"); });
+        HttpFacturesTresorerieClient client = new HttpFacturesTresorerieClient(baseUrl, new AuthentificationSortante());
+        preparerRequeteEntrante();
+        client.enregistrerPaiement(contexte(), fr.wavy.tresorerie.modele.TypeFactureRapprochement.ACHAT, 9L,
+                new fr.wavy.tresorerie.dto.EnregistrementPaiementFactureDto(new java.math.BigDecimal("12.00"), java.time.LocalDate.of(2026,2,1), "RAP-42", 11L, 42L, 7L, true));
+        assertThat(corps.get()).contains("\"operationBancaireId\":11", "\"rapprochementId\":42", "\"tiersId\":7", "\"remboursementBeneficiaire\":true");
+    }
+
     private String demarrer(Gestionnaire gestionnaire) throws IOException {
         serveur = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         serveur.createContext("/", exchange -> gestionnaire.gerer(exchange));

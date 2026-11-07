@@ -6,6 +6,10 @@ import java.time.LocalDate;
 public record EnregistrementPaiementFactureDto(
         BigDecimal montant,
         LocalDate datePaiement,
-        String libelleRapprochement
+        String libelleRapprochement,
+        Long operationBancaireId, Long rapprochementId, Long tiersId, Boolean remboursementBeneficiaire
 ) {
+    public EnregistrementPaiementFactureDto(BigDecimal montant, LocalDate datePaiement, String libelleRapprochement) {
+        this(montant, datePaiement, libelleRapprochement, null, null, null, null);
+    }
 }
