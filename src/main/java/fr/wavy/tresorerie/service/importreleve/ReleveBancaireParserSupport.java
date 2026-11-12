@@ -5,6 +5,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoField;
 import java.util.HashMap;
 import java.util.List;
@@ -15,19 +16,22 @@ import org.apache.poi.ss.usermodel.DateUtil;
 
 abstract class ReleveBancaireParserSupport {
     private static final List<DateTimeFormatter> DATE_FORMATTERS = List.of(
-            DateTimeFormatter.ofPattern("dd/MM/yyyy"),
-            DateTimeFormatter.ofPattern("d/M/yyyy"),
+            DateTimeFormatter.ofPattern("dd/MM/uuuu").withResolverStyle(ResolverStyle.STRICT),
+            DateTimeFormatter.ofPattern("d/M/uuuu").withResolverStyle(ResolverStyle.STRICT),
             formatterDeuxChiffres("dd/MM/"),
             formatterDeuxChiffres("d/M/"),
             DateTimeFormatter.ISO_LOCAL_DATE,
-            DateTimeFormatter.ofPattern("dd-MM-yyyy"),
-            DateTimeFormatter.ofPattern("d-M-yyyy")
+            DateTimeFormatter.ofPattern("dd-MM-uuuu").withResolverStyle(ResolverStyle.STRICT),
+            DateTimeFormatter.ofPattern("d-M-uuuu").withResolverStyle(ResolverStyle.STRICT)
     );
 
     protected Map<String, Integer> indexColonnes(List<String> entetes) {
         Map<String, Integer> index = new HashMap<>();
         for (int i = 0; i < entetes.size(); i++) {
             index.put(normaliserEntete(entetes.get(i)), i);
+        }
+        if (colonne(index, "Date opération", "Date operation", "Date", "Date d'opération") == null) {
+            throw new IllegalArgumentException("colonne de date d’operation absente ou non reconnue");
         }
         return index;
     }
@@ -147,7 +151,7 @@ abstract class ReleveBancaireParserSupport {
     }
 
     protected LigneReleveBancaire ligneDepuisValeursObjets(int numeroLigne, List<?> valeurs, Map<String, Integer> index) {
-        Integer idxDateOperation = colonne(index, "Date opération", "Date operation", "Date");
+        Integer idxDateOperation = colonne(index, "Date opération", "Date operation", "Date", "Date d'opération");
         Integer idxDateValeur = colonne(index, "Date valeur");
         Integer idxLibelle = colonne(index, "Libellé", "Libelle", "Description");
         Integer idxReference = colonne(index, "Référence", "Reference", "Reference bancaire");
@@ -156,6 +160,9 @@ abstract class ReleveBancaireParserSupport {
         Integer idxMontant = colonne(index, "Montant");
 
         LocalDate dateOperation = date(valeurObjet(valeurs, idxDateOperation));
+        if (dateOperation == null) {
+            throw new IllegalArgumentException("date d’operation absente");
+        }
         LocalDate dateValeur = date(valeurObjet(valeurs, idxDateValeur));
         String libelle = texte(valeurObjet(valeurs, idxLibelle));
         if (libelle == null) {
@@ -210,6 +217,6 @@ abstract class ReleveBancaireParserSupport {
         return new DateTimeFormatterBuilder()
                 .appendPattern(prefixe)
                 .appendValueReduced(ChronoField.YEAR, 2, 2, 2000)
-                .toFormatter();
+                .toFormatter().withResolverStyle(ResolverStyle.STRICT);
     }
 }

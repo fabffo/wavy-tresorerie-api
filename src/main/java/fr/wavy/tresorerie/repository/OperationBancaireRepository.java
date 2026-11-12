@@ -24,6 +24,7 @@ public interface OperationBancaireRepository extends JpaRepository<OperationBanc
     Optional<OperationBancaire> findByIdAndTenantIdAndSocieteInterneIdAndActifTrue(Long id, Long tenantId, Long societeInterneId);
     List<OperationBancaire> findByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochementOrderByDateOperationDescIdDesc(Long tenantId, Long societeInterneId, StatutOperationBancaire statut);
     List<OperationBancaire> findByTenantIdAndSocieteInterneIdAndImportReleveBancaireIdAndActifTrueOrderByDateOperationDescIdDesc(Long tenantId, Long societeInterneId, Long importReleveBancaireId);
+    List<OperationBancaire> findByTenantIdAndSocieteInterneIdAndCompteBancaireId(Long tenantId, Long societeInterneId, Long compteBancaireId);
     boolean existsByTenantIdAndSocieteInterneIdAndCompteBancaireIdAndHashOperation(Long tenantId, Long societeInterneId, Long compteBancaireId, String hashOperation);
     long countByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochement(Long tenantId, Long societeInterneId, StatutOperationBancaire statut);
 

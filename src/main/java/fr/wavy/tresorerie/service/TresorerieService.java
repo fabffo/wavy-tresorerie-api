@@ -952,8 +952,14 @@ public class TresorerieService {
     }
 
     private void appliquer(ContexteRequete contexte, OperationBancaire operation, OperationBancaireDemande demande) {
+        boolean identiteImportee = operation.getImportReleveBancaire() != null && operation.getHashOperation() != null;
+        if (identiteImportee && !operation.getCompteBancaire().getId().equals(demande.compteBancaireId())) {
+            throw new RegleMetierException("COMPTE_IMPORT_IMMUABLE", "Le compte d’une operation importee ne peut pas etre modifie.");
+        }
         operation.setCompteBancaire(trouverCompte(contexte, demande.compteBancaireId()));
-        operation.setImportReleveBancaire(demande.importReleveBancaireId() == null ? null : trouverImport(contexte, demande.importReleveBancaireId()));
+        if (!identiteImportee) {
+            operation.setImportReleveBancaire(demande.importReleveBancaireId() == null ? null : trouverImport(contexte, demande.importReleveBancaireId()));
+        }
         operation.setDateOperation(demande.dateOperation());
         operation.setDateValeur(demande.dateValeur());
         operation.setLibelle(demande.libelle());
@@ -976,16 +982,19 @@ public class TresorerieService {
         operation.setTiersId(demande.tiersId());
         operation.setFactureId(demande.factureId());
         operation.setTypeFacture(demande.typeFacture());
-        operation.setHashOperation(importReleveService.hash(contexte, operation.getCompteBancaire().getId(), new LigneReleveBancaire(
-                0,
-                operation.getDateOperation(),
-                operation.getDateValeur(),
-                operation.getLibelle(),
-                operation.getReferenceBancaire(),
-                operation.getDebit(),
-                operation.getCredit(),
-                operation.getMontant()
-        )));
+        // Import identities remain stable when editable business fields change.
+        if (!identiteImportee) {
+            operation.setHashOperation(importReleveService.hash(contexte, operation.getCompteBancaire().getId(), new LigneReleveBancaire(
+                    0,
+                    operation.getDateOperation(),
+                    operation.getDateValeur(),
+                    operation.getLibelle(),
+                    operation.getReferenceBancaire(),
+                    operation.getDebit(),
+                    operation.getCredit(),
+                    operation.getMontant()
+            )));
+        }
         operation.setDateModification(LocalDateTime.now());
     }
 

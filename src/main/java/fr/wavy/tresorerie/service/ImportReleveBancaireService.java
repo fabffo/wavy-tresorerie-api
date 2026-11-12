@@ -7,9 +7,13 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -72,7 +76,7 @@ public class ImportReleveBancaireService {
         if (fichier == null || fichier.isEmpty()) {
             throw new RegleMetierException("FICHIER_OBLIGATOIRE", "Le fichier de releve bancaire est obligatoire.");
         }
-        CompteBancaire compte = compteRepository.findByIdAndTenantIdAndSocieteInterneIdAndActifTrue(
+        CompteBancaire compte = compteRepository.verrouillerPourImport(
                         compteBancaireId, contexte.tenantId(), contexte.societeCouranteId())
                 .orElseThrow(() -> new RessourceNonTrouveeException("Compte bancaire introuvable."));
 
@@ -97,10 +101,59 @@ public class ImportReleveBancaireService {
         importReleve = importRepository.save(importReleve);
         List<RegleClassificationOperation> reglesSalaries = reglesSalaries(contexte);
 
+        // Reserve exact occurrence identities before matching historical MD5/SHA-256 rows.
+        // Match legacy hashes or stored fields without rewriting historical hashes or links.
+        Map<String, Integer> occurrences = new HashMap<>();
+        List<String> hashes = new ArrayList<>();
         for (LigneReleveBancaire ligne : parsing.lignes()) {
-            String hash = hash(contexte, compte.getId(), ligne);
-            if (operationRepository.existsByTenantIdAndSocieteInterneIdAndCompteBancaireIdAndHashOperation(
-                    contexte.tenantId(), contexte.societeCouranteId(), compte.getId(), hash)) {
+            int rang = occurrences.merge(signature(ligne), 1, Integer::sum);
+            hashes.add(hashOccurrence(contexte, compte.getId(), ligne, rang));
+        }
+        Map<String, String> signaturesAnciennes = new HashMap<>();
+        for (LigneReleveBancaire ligne : parsing.lignes()) {
+            Set<String> montants = new HashSet<>();
+            montants.add(ligne.montant().toString());
+            montants.add(ligne.montant().toPlainString());
+            montants.add(ligne.montant().stripTrailingZeros().toPlainString());
+            try {
+                montants.add(ligne.montant().setScale(2).toPlainString());
+            } catch (ArithmeticException ignored) {
+                // Never round a bank amount to match an old identity.
+            }
+            for (String montant : montants) {
+                String source = contexte.tenantId() + "|" + contexte.societeCouranteId() + "|" + compte.getId()
+                        + "|" + ligne.dateOperation() + "|" + ligne.libelle() + "|" + montant + "|"
+                        + (ligne.referenceBancaire() == null ? "" : ligne.referenceBancaire());
+                for (String algorithme : List.of("MD5", "SHA-256")) {
+                    signaturesAnciennes.put(empreinte(algorithme, source), signature(ligne));
+                }
+            }
+        }
+        Set<String> attendus = new HashSet<>(hashes);
+        Set<String> existants = new HashSet<>();
+        Map<String, Integer> historiques = new HashMap<>();
+        for (OperationBancaire operation : operationRepository.findByTenantIdAndSocieteInterneIdAndCompteBancaireId(
+                contexte.tenantId(), contexte.societeCouranteId(), compte.getId())) {
+            existants.add(operation.getHashOperation());
+            if (!attendus.contains(operation.getHashOperation())) {
+                String ancienneSignature = signaturesAnciennes.get(operation.getHashOperation());
+                if (ancienneSignature == null) {
+                    ancienneSignature = signature(new LigneReleveBancaire(0, operation.getDateOperation(),
+                            operation.getDateValeur(), operation.getLibelle(), operation.getReferenceBancaire(),
+                            operation.getDebit(), operation.getCredit(), operation.getMontant()));
+                }
+                historiques.merge(ancienneSignature, 1, Integer::sum);
+            }
+        }
+        int position = 0;
+        for (LigneReleveBancaire ligne : parsing.lignes()) {
+            String hash = hashes.get(position++);
+            String signature = signature(ligne);
+            boolean historique = !existants.contains(hash) && historiques.getOrDefault(signature, 0) > 0;
+            if (historique) {
+                historiques.compute(signature, (cle, nombre) -> nombre - 1);
+            }
+            if (existants.contains(hash) || historique) {
                 rejetees++;
                 erreurs.add("Ligne " + ligne.numeroLigne() + " : doublon");
                 continue;
@@ -207,6 +260,33 @@ public class ImportReleveBancaireService {
         return valeur.trim().replaceAll("\\s+", " ");
     }
 
+    private String signature(LigneReleveBancaire ligne) {
+        // Length framing avoids collisions between fields containing separators.
+        return champ(ligne.dateOperation().toString()) + champ(ligne.libelle())
+                + champ(ligne.montant().stripTrailingZeros().toPlainString())
+                + champ(ligne.referenceBancaire() == null ? "" : ligne.referenceBancaire());
+    }
+
+    private String champ(String texte) {
+        return texte.length() + ":" + texte;
+    }
+
+    public String hashOccurrence(ContexteRequete contexte, Long compteId, LigneReleveBancaire ligne, int rang) {
+        if (rang < 1) throw new IllegalArgumentException("rang d’occurrence invalide");
+        String source = "occurrence-v2|" + contexte.tenantId() + "|" + contexte.societeCouranteId()
+                + "|" + compteId + "|" + signature(ligne) + "|" + rang;
+        return empreinte("SHA-256", source);
+    }
+
+    private String empreinte(String algorithme, String source) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance(algorithme)
+                    .digest(source.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("Algorithme d’empreinte indisponible", exception);
+        }
+    }
+
     public String hash(ContexteRequete contexte, Long compteBancaireId, LigneReleveBancaire ligne) {
         String source = contexte.tenantId() + "|" + contexte.societeCouranteId() + "|" + compteBancaireId + "|"
                 + ligne.dateOperation() + "|" + ligne.libelle() + "|" + ligne.montant() + "|"
@@ -226,6 +306,8 @@ public class ImportReleveBancaireService {
                 case XLS, XLSX -> excelParser.parser(fichier.getInputStream());
                 default -> throw new RegleMetierException("FORMAT_NON_SUPPORTE", "Format de fichier non supporte.");
             };
+        } catch (IllegalArgumentException exception) {
+            throw new RegleMetierException("IMPORT_INVALIDE", exception.getMessage());
         } catch (IOException exception) {
             throw new RegleMetierException("IMPORT_ILLISIBLE", "Le fichier de releve bancaire est illisible.");
         }
