@@ -20,6 +20,8 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import fr.wavy.tresorerie.dto.ConfirmationCarteDemande;
+import fr.wavy.tresorerie.dto.PropositionsCarteResultat;
 import fr.wavy.tresorerie.configuration.ContexteRequete;
 import fr.wavy.tresorerie.configuration.ContexteRequeteResolver;
 import fr.wavy.tresorerie.dto.BalanceAgeeReponse;
@@ -193,6 +195,17 @@ public class TresorerieControleur {
     @PostMapping("/operations-bancaires/rapprochement-salaires")
     public RapprochementFacturesResultat rapprocherSalaires(HttpServletRequest request) {
         return tresorerieService.rapprocherSalaires(contexte(request));
+    }
+
+    @GetMapping("/operations-bancaires/rapprochement-cartes")
+    public PropositionsCarteResultat proposerCartes(HttpServletRequest request) {
+        return tresorerieService.proposerCartes(contexte(request));
+    }
+
+    @PostMapping("/operations-bancaires/{id}/rapprochement-carte")
+    public RapprochementFacturesResultat confirmerCarte(HttpServletRequest request, @PathVariable Long id,
+            @Valid @RequestBody ConfirmationCarteDemande demande) {
+        return tresorerieService.confirmerCarte(contexte(request), id, demande);
     }
 
     @PostMapping("/operations-bancaires/rapprochement-notes-frais")

@@ -14,6 +14,24 @@ import fr.wavy.tresorerie.service.ClassificationOperationBancaireService.RegleCl
 import java.util.List;
 
 class ClassificationOperationBancaireServiceTest {
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"PAIEMENT PAR CARTE INDIGO", "PAIEMENT FOURNISSEUR", "PAIEMENTS CB", "PREPAIEMENT"})
+    void paiementNeDeclencheJamaisLaReconnaissanceSalaire(String libelle) {
+        var operation = new OperationBancaire(); operation.setLibelle(libelle); operation.setSens(SensOperation.DEBIT);
+        new ClassificationOperationBancaireService().classerAutomatiquement(operation, List.of(
+                new RegleClassificationOperation(7L, "INDIGO", TypeTiersReconnu.FOURNISSEUR, "INDIGO", "CONTIENT", 100, true)));
+        assertThat(operation.getNatureOperation()).isNotEqualTo(NatureOperationBancaire.SALAIRE);
+        if (libelle.contains("INDIGO")) assertThat(operation.getTiersId()).isEqualTo(7L);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"VIR PAIE JANVIER", "VIREMENT PAYE", "SALAIRE JANVIER", "BULLETIN DE PAIE", "REMUNERATION", "PAIES"})
+    void conserveLesVeritablesLibellesDePaie(String libelle) {
+        var operation = new OperationBancaire(); operation.setLibelle(libelle); operation.setSens(SensOperation.DEBIT);
+        new ClassificationOperationBancaireService().classerAutomatiquement(operation);
+        assertThat(operation.getNatureOperation()).isEqualTo(NatureOperationBancaire.SALAIRE);
+    }
     private final ClassificationOperationBancaireService service = new ClassificationOperationBancaireService();
 
     @Test

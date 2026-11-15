@@ -10,6 +10,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
+import fr.wavy.tresorerie.dto.PieceCarteRapprochementDto;
 import fr.wavy.tresorerie.configuration.ContexteRequete;
 import fr.wavy.tresorerie.configuration.AuthentificationSortante;
 import fr.wavy.tresorerie.dto.BalanceAgeeReponse;
@@ -35,6 +36,16 @@ public class HttpFacturesTresorerieClient implements FacturesTresorerieClient {
             AuthentificationSortante authentificationSortante) {
         this.restClient = RestClient.builder().baseUrl(facturesApiUrl).build();
         this.authentificationSortante = authentificationSortante;
+    }
+
+    @Override
+    public List<PieceCarteRapprochementDto> listerCartesOuvertes(ContexteRequete contexte) {
+        return executer(() -> {
+            var pieces = restClient.get().uri("/api/factures/rapprochement/cartes-ouvertes")
+                    .headers(headers -> appliquerContexte(headers, contexte)).retrieve()
+                    .body(PieceCarteRapprochementDto[].class);
+            return pieces == null ? List.of() : List.of(pieces);
+        });
     }
 
     @Override

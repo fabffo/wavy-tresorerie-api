@@ -74,6 +74,19 @@ class SecuriteRecetteTest {
     }
 
     @Test
+    void parcoursCarteExigeAuthentificationEtConfirmationExplicite() throws Exception {
+        mockMvc.perform(get("/api/tresorerie/operations-bancaires/rapprochement-cartes"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/tresorerie/operations-bancaires/1/rapprochement-carte")
+                .header("Authorization", "Bearer jeton-test").header("X-Tenant-Id",3)
+                .header("X-Utilisateur-Id",7).header("X-Societe-Courante-Id",11)
+                .contentType("application/json").content("{\"factureId\":10,\"tiersConfirme\":7}"))
+                .andExpect(status().isBadRequest());
+        org.mockito.Mockito.verify(tresorerieService, org.mockito.Mockito.never()).confirmerCarte(any(), any(), any());
+    }
+
+    @Test
     void headersForgesSeulsSontRefuses() throws Exception {
         mockMvc.perform(requeteMetier(3, 7, 11)).andExpect(status().isUnauthorized());
     }

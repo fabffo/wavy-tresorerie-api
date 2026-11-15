@@ -23,6 +23,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
+import fr.wavy.tresorerie.dto.ConfirmationCarteDemande;
+import fr.wavy.tresorerie.dto.PieceCarteRapprochementDto;
+import fr.wavy.tresorerie.dto.PropositionCarteDto;
+import fr.wavy.tresorerie.dto.PropositionsCarteResultat;
 import fr.wavy.tresorerie.client.FacturesTresorerieClient;
 import fr.wavy.tresorerie.client.TiersTresorerieClient;
 import fr.wavy.tresorerie.configuration.ContexteRequete;
@@ -365,6 +369,37 @@ public class TresorerieService {
         return new RapprochementFacturesResultat(1, resultat.rapprochementsCrees(), resultat.propositionsCreees(), resultat.sansMatch(), resultat.messages());
     }
 
+    @Transactional(readOnly = true)
+    public PropositionsCarteResultat proposerCartes(ContexteRequete contexte) {
+        var operations = operationRepository.findByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochementOrderByDateOperationDescIdDesc(
+                contexte.tenantId(), contexte.societeCouranteId(), StatutOperationBancaire.NON_RAPPROCHEE)
+                .stream().filter(o -> !o.isRapprochee() && o.getSens() == SensOperation.DEBIT).toList();
+        var pieces = facturesClient.listerCartesOuvertes(contexte);
+        var enCours = rapprochementRepository.findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(contexte.tenantId(), contexte.societeCouranteId())
+                .stream().filter(r -> r.getStatut() == StatutRapprochement.PROPOSE || r.getStatut() == StatutRapprochement.VALIDE).toList();
+        List<PropositionCarteDto> candidats = new ArrayList<>();
+        for (var operation : operations) for (var piece : pieces)
+            RapprochementCarteMatcher.comparer(operation, piece).ifPresent(candidats::add);
+        var resultat = candidats.stream().map(p -> p.avecConflits(
+                candidats.stream().anyMatch(a -> a != p && (a.operationId().equals(p.operationId()) || a.factureId().equals(p.factureId()))),
+                p.conflit() || enCours.stream().anyMatch(r ->
+                        (r.getOperationBancaire().getId().equals(p.operationId())
+                                || (r.getTypeFacture() == TypeFactureRapprochement.ACHAT && p.factureId().equals(r.getFactureId())))
+                        && !(r.getOperationBancaire().getId().equals(p.operationId()) && p.factureId().equals(r.getFactureId())
+                            && "CARTE_ENTREPRISE".equals(r.getModeRapprochement())))))
+                .sorted(Comparator.comparing(PropositionCarteDto::dateAtypique)
+                        .thenComparing(p -> !p.commercantReconnu()).thenComparing(PropositionCarteDto::operationId))
+                .toList();
+        return new PropositionsCarteResultat(operations.size(), pieces.size(),
+                (int) operations.stream().filter(o -> candidats.stream().noneMatch(p -> p.operationId().equals(o.getId()))).count(), resultat);
+    }
+
+    public RapprochementFacturesResultat confirmerCarte(ContexteRequete contexte, Long operationId,
+            ConfirmationCarteDemande demande) {
+        paiementsAchats.confirmerCarte(contexte, operationId, demande);
+        return new RapprochementFacturesResultat(1, 1, 0, 0, List.of("Dépense carte confirmée par l'utilisateur."));
+    }
+
     public RapprochementFacturesResultat rapprocherNotesFrais(ContexteRequete contexte) {
         List<OperationBancaire> operations = operationRepository.findByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochementOrderByDateOperationDescIdDesc(
                         contexte.tenantId(), contexte.societeCouranteId(), StatutOperationBancaire.NON_RAPPROCHEE)
@@ -398,7 +433,12 @@ public class TresorerieService {
         }
         if (typeFacture == TypeFactureRapprochement.ACHAT && reprendrePaiementsEngages(contexte, operation))
             return new ResultatRapprochementOperation(1, 0, 0, List.of("Paiement repris sans doublon."));
-        List<FactureOuverteRapprochementDto> factures = facturesClient.listerFacturesOuvertes(contexte, typeFacture, operation.getTiersId());
+        // Les pièces carte passent toujours par le choix explicite du parcours carte, jamais par le score automatique.
+        Set<Long> cartes = typeFacture == TypeFactureRapprochement.ACHAT
+                ? facturesClient.listerCartesOuvertes(contexte).stream().map(PieceCarteRapprochementDto::id).collect(Collectors.toSet())
+                : Set.of();
+        List<FactureOuverteRapprochementDto> factures = facturesClient.listerFacturesOuvertes(contexte, typeFacture, operation.getTiersId())
+                .stream().filter(f -> typeFacture != TypeFactureRapprochement.ACHAT || !cartes.contains(f.id())).toList();
         BigDecimal montant = montantOperation(operation);
         MatchFacture meilleur = factures.stream()
                 .map(facture -> new MatchFacture(facture, score(operation, facture, montant), differenceMontant(montant, facture.resteAPayer())))

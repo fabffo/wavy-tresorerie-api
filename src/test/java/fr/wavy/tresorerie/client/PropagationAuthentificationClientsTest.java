@@ -92,6 +92,30 @@ class PropagationAuthentificationClientsTest {
     }
 
     @Test
+    void cartesSansTiersConserventAuthentificationContexteEtDates() throws Exception {
+        AtomicReference<com.sun.net.httpserver.Headers> entetes = new AtomicReference<>();
+        AtomicReference<String> chemin = new AtomicReference<>();
+        String baseUrl = demarrer(exchange -> {
+            entetes.set(exchange.getRequestHeaders()); chemin.set(exchange.getRequestURI().toString());
+            repondre(exchange, 200, "[{\"id\":9,\"tenantId\":3,\"societeInterneId\":11,\"tiersId\":7,\"dateDepense\":\"2026-01-20\",\"montant\":2}]");
+        });
+        preparerRequeteEntrante();
+        var client = new HttpFacturesTresorerieClient(baseUrl, new AuthentificationSortante());
+        var pieces = client.listerCartesOuvertes(contexte());
+        assertThat(chemin.get()).isEqualTo("/api/factures/rapprochement/cartes-ouvertes");
+        verifierEntetes(entetes.get());
+        assertThat(pieces.get(0).dateDepense()).isEqualTo(java.time.LocalDate.of(2026,1,20));
+    }
+
+    @Test
+    void refusCartesNestPasMasqueEnAbsenceDeCorrespondance() throws Exception {
+        String baseUrl = demarrer(exchange -> repondre(exchange, 403, ""));
+        preparerRequeteEntrante();
+        assertThatThrownBy(() -> new HttpFacturesTresorerieClient(baseUrl, new AuthentificationSortante()).listerCartesOuvertes(contexte()))
+                .isInstanceOf(ErreurInterserviceException.class).extracting("statut.value").isEqualTo(403);
+    }
+
+    @Test
     void paiementTransmetLesReferencesDurables() throws Exception {
         AtomicReference<String> corps = new AtomicReference<>();
         String baseUrl = demarrer(exchange -> { corps.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)); repondre(exchange, 200, "{}"); });

@@ -211,7 +211,8 @@ public class ClassificationOperationBancaireService {
     }
 
     private boolean contientMotCleSalaire(String texte) {
-        return contientUn(texte, "SALAIRE", "PAIE", "PAYE", "BULLETIN", "REMUNERATION");
+        return Pattern.compile("(?U)\\b(?:SALAIRE[S]?|PAIE[S]?|PAYE[S]?|BULLETIN[S]?|REMUNERATION[S]?)\\b")
+                .matcher(texte).find();
     }
 
     private String normaliserFragment(String valeur) {

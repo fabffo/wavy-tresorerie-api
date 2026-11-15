@@ -3,6 +3,7 @@ package fr.wavy.tresorerie.client;
 import java.util.List;
 import java.math.BigDecimal;
 
+import fr.wavy.tresorerie.dto.PieceCarteRapprochementDto;
 import fr.wavy.tresorerie.configuration.ContexteRequete;
 import fr.wavy.tresorerie.dto.BalanceAgeeReponse;
 import fr.wavy.tresorerie.dto.CreationFactureAchatDepuisOperationBancaireDemande;
@@ -17,6 +18,8 @@ import fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto;
 import fr.wavy.tresorerie.modele.TypeFactureRapprochement;
 
 public interface FacturesTresorerieClient {
+    List<PieceCarteRapprochementDto> listerCartesOuvertes(ContexteRequete contexte);
+
     PageEcheancesReponse<FactureEcheanceReponse> listerEcheances(ContexteRequete contexte, String queryString);
     KpiEcheancesReponse kpisEcheances(ContexteRequete contexte);
     BalanceAgeeReponse balanceAgee(ContexteRequete contexte);
