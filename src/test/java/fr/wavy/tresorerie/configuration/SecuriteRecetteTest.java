@@ -139,6 +139,52 @@ class SecuriteRecetteTest {
                 .andExpect(status().isForbidden());
     }
 
+    private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder requeteLot(String corps) {
+        return org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                "/api/tresorerie/operations-bancaires/rapprochement-cartes/confirmer")
+                .header("X-Tenant-Id",3).header("X-Utilisateur-Id",7).header("X-Societe-Courante-Id",11)
+                .contentType("application/json").content(corps);
+    }
+
+    private String lotValide() {
+        return """
+            {"confirmation":true,"lignes":[{"operationId":1,"demande":{"factureId":10,"tiersConfirme":7,
+             "confirmation":true,"confirmerAffectation":true,"confirmerDateAtypique":false}}]}
+            """;
+    }
+
+    @Test void lotSansAuthentificationOuAvecSocieteForgeeEstRefuse() throws Exception {
+        mockMvc.perform(requeteLot(lotValide())).andExpect(status().isUnauthorized());
+        mockMvc.perform(requeteLot(lotValide()).header("Authorization","Bearer jeton-test")
+                .with(request -> {
+                    request.removeHeader("X-Societe-Courante-Id");
+                    request.addHeader("X-Societe-Courante-Id",12);
+                    return request;
+                })).andExpect(status().isForbidden());
+        org.mockito.Mockito.verify(tresorerieService,org.mockito.Mockito.never()).confirmerCartes(any(),any());
+    }
+
+    @Test void lotEtChaqueLigneExigentUneConfirmationExpliciteEtUnIdentifiantPositif() throws Exception {
+        for (String corps : List.of(lotValide().replace("\"confirmation\":true,\"lignes\"", "\"confirmation\":false,\"lignes\""),
+                lotValide().replace("\"confirmation\":true,\"confirmerAffectation\"", "\"confirmation\":false,\"confirmerAffectation\""),
+                lotValide().replace("\"operationId\":1", "\"operationId\":0"),
+                "{\"confirmation\":true,\"lignes\":[]}", "{\"confirmation\":true,\"lignes\":[null]}")) {
+            mockMvc.perform(requeteLot(corps).header("Authorization","Bearer jeton-test")).andExpect(status().isBadRequest());
+        }
+        org.mockito.Mockito.verify(tresorerieService,org.mockito.Mockito.never()).confirmerCartes(any(),any());
+    }
+
+    @Test void lotValideTransmetContexteAuthentifieEtResultatParLigne() throws Exception {
+        when(tresorerieService.confirmerCartes(any(),any())).thenReturn(new fr.wavy.tresorerie.dto.ConfirmationCartesResultat(
+                1,0,0,List.of(new fr.wavy.tresorerie.dto.ConfirmationCartesResultat.Ligne(1L,10L,"SUCCES",100L,null,"Confirmé"))));
+        mockMvc.perform(requeteLot(lotValide()).header("Authorization","Bearer jeton-test"))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.lignes[0].rapprochementId").value(100));
+        org.mockito.Mockito.verify(tresorerieService).confirmerCartes(
+                org.mockito.ArgumentMatchers.argThat(c -> c.tenantId().equals(3L) && c.societeCouranteId().equals(11L)),
+                org.mockito.ArgumentMatchers.argThat(d -> d.lignes().get(0).operationId().equals(1L)));
+    }
+
     private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder requeteMetier(
             long tenantId, long utilisateurId, long societeId) {
         return get("/api/tresorerie/comptes-bancaires")

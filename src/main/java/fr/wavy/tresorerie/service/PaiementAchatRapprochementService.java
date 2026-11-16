@@ -3,6 +3,11 @@ package fr.wavy.tresorerie.service;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import fr.wavy.tresorerie.dto.ConfirmationCartesDemande;
+import fr.wavy.tresorerie.dto.ConfirmationCartesResultat;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -111,8 +116,47 @@ public class PaiementAchatRapprochementService {
         return rapprochements.saveAndFlush(r).getId();
     }
 
+    /** Pas de transaction de lot : chaque ligne conserve les transactions et reçus existants. */
+    public ConfirmationCartesResultat confirmerCartes(ContexteRequete c, ConfirmationCartesDemande lot) {
+        if (lot == null || !Boolean.TRUE.equals(lot.confirmation()) || lot.lignes() == null
+                || lot.lignes().isEmpty() || lot.lignes().size() > 200)
+            throw erreur("CONFIRMATION_CARTE_REQUISE", "Confirmez un lot de 1 à 200 rapprochements.");
+        Map<Long, Integer> operationsDemandees = new HashMap<>(), piecesDemandees = new HashMap<>();
+        for (var ligne : lot.lignes()) {
+            if (ligne == null || ligne.operationId() == null || ligne.demande() == null || ligne.demande().factureId() == null)
+                throw erreur("DEMANDE_CARTE_INVALIDE", "Une opération et une pièce sont obligatoires pour chaque ligne.");
+            operationsDemandees.merge(ligne.operationId(), 1, Integer::sum);
+            piecesDemandees.merge(ligne.demande().factureId(), 1, Integer::sum);
+        }
+        var resultats = new ArrayList<ConfirmationCartesResultat.Ligne>();
+        for (var ligne : lot.lignes()) {
+            Long operation = ligne.operationId(), piece = ligne.demande().factureId();
+            try {
+                // Refuser toutes les occurrences : ne pas choisir arbitrairement la première.
+                if (operationsDemandees.get(operation) > 1 || piecesDemandees.get(piece) > 1)
+                    throw erreur("DOUBLON_CARTE", "Une opération ou une pièce apparaît plusieurs fois dans le lot.");
+                Long id = confirmerCarte(c, operation, ligne.demande(), true);
+                resultats.add(new ConfirmationCartesResultat.Ligne(operation, piece, "SUCCES", id, null, "Rapprochement confirmé."));
+            } catch (RegleMetierException e) {
+                boolean conflit = java.util.Set.of("DOUBLON_CARTE", "CONFLIT_CARTE", "TIERS_CARTE_DIFFERENT", "AMBIGUITE_CARTE").contains(e.getCode());
+                resultats.add(new ConfirmationCartesResultat.Ligne(operation, piece, conflit ? "CONFLIT" : "REFUSE", null, e.getCode(), e.getMessage()));
+            } catch (RuntimeException e) {
+                // Un appel distant peut avoir abouti : conserver l'intention et sa clé idempotente.
+                resultats.add(new ConfirmationCartesResultat.Ligne(operation, piece, "REFUSE", null,
+                        "RESULTAT_A_REPRENDRE", "Résultat non confirmé. Réessayez ce même couple : la reprise est idempotente."));
+            }
+        }
+        return new ConfirmationCartesResultat((int) resultats.stream().filter(l -> l.statut().equals("SUCCES")).count(),
+                (int) resultats.stream().filter(l -> l.statut().equals("REFUSE")).count(),
+                (int) resultats.stream().filter(l -> l.statut().equals("CONFLIT")).count(), List.copyOf(resultats));
+    }
+
     /** L'association du tiers et la classification ne sont faites qu'après consentement explicite. */
     public Long confirmerCarte(ContexteRequete c, Long operationId, ConfirmationCarteDemande demande) {
+        return confirmerCarte(c, operationId, demande, false);
+    }
+
+    private Long confirmerCarte(ContexteRequete c, Long operationId, ConfirmationCarteDemande demande, boolean groupe) {
         if (demande == null || !Boolean.TRUE.equals(demande.confirmation()) || demande.factureId() == null || demande.tiersConfirme() == null)
             throw erreur("CONFIRMATION_CARTE_REQUISE", "Confirmation de la pièce et de son fournisseur obligatoire.");
         Long id = tx(() -> {
@@ -134,12 +178,22 @@ public class PaiementAchatRapprochementService {
                 if (memeOperation || memePiece)
                     throw erreur("CONFLIT_CARTE", "Une autre proposition ou un rapprochement réserve cette opération ou cette pièce.");
             }
-            var piece = factures.listerCartesOuvertes(c).stream().filter(p -> demande.factureId().equals(p.id())).findFirst()
+            var piecesOuvertes = factures.listerCartesOuvertes(c);
+            var piece = piecesOuvertes.stream().filter(p -> demande.factureId().equals(p.id())).findFirst()
                     .orElseThrow(() -> erreur("PIECE_CARTE_INDISPONIBLE", "La pièce carte n'est plus ouverte dans cette société."));
             var candidat = RapprochementCarteMatcher.comparer(op, piece)
                     .orElseThrow(() -> erreur("CARTE_NON_ELIGIBLE", "Opération, société ou montant non éligible à cette pièce carte."));
             if (candidat.conflit() || !demande.tiersConfirme().equals(piece.tiersId()))
                 throw erreur("TIERS_CARTE_DIFFERENT", "Le fournisseur confirmé doit correspondre à la pièce et au tiers bancaire existant.");
+            if (groupe) {
+                if (candidat.ecart().signum() != 0 || candidat.dateAtypique() || !candidat.commercantReconnu())
+                    throw erreur("VERIFICATION_INDIVIDUELLE_CARTE", "Montant, dates ou commerçant à vérifier individuellement avec le justificatif.");
+                var autresOperations = operations.findByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochementOrderByDateOperationDescIdDesc(
+                        c.tenantId(), c.societeCouranteId(), StatutOperationBancaire.NON_RAPPROCHEE);
+                if (piecesOuvertes.stream().anyMatch(p -> !p.id().equals(piece.id()) && RapprochementCarteMatcher.comparer(op, p).isPresent())
+                        || autresOperations.stream().anyMatch(o -> !o.getId().equals(op.getId()) && RapprochementCarteMatcher.comparer(o, piece).isPresent()))
+                    throw erreur("AMBIGUITE_CARTE", "Plusieurs correspondances existent : vérifiez et confirmez cette ligne individuellement.");
+            }
             if (candidat.dateAtypique() && !Boolean.TRUE.equals(demande.confirmerDateAtypique()))
                 throw erreur("DATE_CARTE_ATYPIQUE", "Vérifiez le justificatif et confirmez explicitement la date atypique.");
             if (candidat.affectationRequise()) {

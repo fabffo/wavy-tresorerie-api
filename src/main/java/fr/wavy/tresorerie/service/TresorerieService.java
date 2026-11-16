@@ -24,6 +24,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import fr.wavy.tresorerie.dto.ConfirmationCarteDemande;
+import fr.wavy.tresorerie.dto.ConfirmationCartesDemande;
+import fr.wavy.tresorerie.dto.ConfirmationCartesResultat;
 import fr.wavy.tresorerie.dto.PieceCarteRapprochementDto;
 import fr.wavy.tresorerie.dto.PropositionCarteDto;
 import fr.wavy.tresorerie.dto.PropositionsCarteResultat;
@@ -398,6 +400,10 @@ public class TresorerieService {
             ConfirmationCarteDemande demande) {
         paiementsAchats.confirmerCarte(contexte, operationId, demande);
         return new RapprochementFacturesResultat(1, 1, 0, 0, List.of("Dépense carte confirmée par l'utilisateur."));
+    }
+
+    public ConfirmationCartesResultat confirmerCartes(ContexteRequete contexte, ConfirmationCartesDemande demande) {
+        return paiementsAchats.confirmerCartes(contexte, demande);
     }
 
     public RapprochementFacturesResultat rapprocherNotesFrais(ContexteRequete contexte) {

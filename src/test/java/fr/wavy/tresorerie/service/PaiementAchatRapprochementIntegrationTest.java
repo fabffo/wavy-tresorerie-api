@@ -295,4 +295,111 @@ class PaiementAchatRapprochementIntegrationTest {
             assertThat(a.get(15,TimeUnit.SECONDS)).isEqualTo(b.get(15,TimeUnit.SECONDS));
         }finally{pool.shutdownNow();}
     }
+    ConfirmationCartesDemande lot(Long... ids) {
+        var lignes = new ArrayList<ConfirmationCartesDemande.Ligne>();
+        for (int i = 0; i < ids.length; i++) lignes.add(new ConfirmationCartesDemande.Ligne(ids[i],
+                new ConfirmationCarteDemande(i == 0 ? 10L : 11L, 7L, true, true, false)));
+        return new ConfirmationCartesDemande(true, lignes);
+    }
+    void carteSure() {
+        sansTiers();
+        jdbc.update("update operation_bancaire set libelle='PAIEMENT SSP FRANCE 31/01' where id=?",op);
+    }
+    Long lotDeuxPieces() {
+        carteSure(); Long autre = deuxiemeCarte();
+        jdbc.update("update operation_bancaire set debit=42,montant=42,libelle='PAIEMENT SSP FRANCE 31/01' where id=?",autre);
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte(),
+                new PieceCarteRapprochementDto(11L,c.tenantId(),c.societeCouranteId(),7L,"FA-11",
+                        LocalDate.of(2026,1,31),LocalDate.of(2026,1,31),new BigDecimal("42.00"),"SSP France","SSP France","Pièce carte")));
+        return autre;
+    }
+    @Test void lotDeuxPiecesDistinctesEtDoubleSoumissionIdempotente() {
+        Long autre = lotDeuxPieces(); var demande = lot(op,autre);
+        var r = service.confirmerCartes(c,demande);
+        assertThat(r.reussis()).isEqualTo(2);assertThat(r.refuses()).isZero();assertThat(r.conflits()).isZero();
+        assertThat(service.confirmerCartes(c,demande).lignes()).extracting(ConfirmationCartesResultat.Ligne::rapprochementId)
+                .containsExactlyElementsOf(r.lignes().stream().map(ConfirmationCartesResultat.Ligne::rapprochementId).toList());
+        assertThat(operations.findById(op).orElseThrow().isRapprochee()).isTrue();
+        assertThat(operations.findById(autre).orElseThrow().isRapprochee()).isTrue();
+        verify(factures,times(2)).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void lotRefuseToutesOccurrencesOperationOuPieceEnDoubleSansPaiement() {
+        Long autre = lotDeuxPieces();
+        for(var demande : List.of(lot(op,op),new ConfirmationCartesDemande(true,List.of(
+                new ConfirmationCartesDemande.Ligne(op,confirmation(true,false)),
+                new ConfirmationCartesDemande.Ligne(autre,confirmation(true,false)))))) {
+            var r = service.confirmerCartes(c,demande);
+            assertThat(r.conflits()).isEqualTo(2);assertThat(r.reussis()).isZero();
+            assertThat(r.lignes()).allMatch(l -> l.code().equals("DOUBLON_CARTE"));
+        }
+        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void lotIndigoFreeMobileMemeMontantResteAmbiguEtChoixIndividuelPossible() {
+        carteSure(); Long autre = deuxiemeCarte();
+        jdbc.update("update operation_bancaire set libelle='PAIEMENT INDIGO 31/01',debit=2,montant=2 where id=?",op);
+        jdbc.update("update operation_bancaire set libelle='PAIEMENT FREE MOBILE 31/01',debit=2,montant=2 where id=?",autre);
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(10L,c.tenantId(),c.societeCouranteId(),7L,"FA-10",
+                LocalDate.of(2026,1,31),LocalDate.of(2026,1,31),new BigDecimal("2.00"),"INDIGO","INDIGO","Parking")));
+        assertThat(service.proposerCartes(c).propositions()).hasSize(2).allMatch(PropositionCarteDto::ambiguite);
+        assertThat(service.confirmerCartes(c,lot(op)).lignes().get(0).code()).isEqualTo("AMBIGUITE_CARTE");
+        assertThat(service.confirmerCartes(c,lot(autre)).lignes().get(0).code()).isEqualTo("VERIFICATION_INDIVIDUELLE_CARTE");
+        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+        paiements.confirmerCarte(c,op,confirmation(true,false));
+        assertThat(operations.findById(autre).orElseThrow().isRapprochee()).isFalse();
+    }
+    @Test void lotCommercantDifferentDateAtypiqueEtCentimeDemandentUnChoixIndividuel() {
+        sansTiers();
+        assertThat(service.confirmerCartes(c,lot(op)).lignes().get(0).code()).isEqualTo("VERIFICATION_INDIVIDUELLE_CARTE");
+        carteSure();jdbc.update("update operation_bancaire set date_operation='2026-03-01' where id=?",op);
+        assertThat(service.confirmerCartes(c,lot(op)).lignes().get(0).code()).isEqualTo("VERIFICATION_INDIVIDUELLE_CARTE");
+        jdbc.update("update operation_bancaire set date_operation='2026-02-01',debit=100.01,montant=100.01 where id=?",op);
+        assertThat(service.confirmerCartes(c,lot(op)).lignes().get(0).code()).isEqualTo("VERIFICATION_INDIVIDUELLE_CARTE");
+        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void lotEchecPartielContinueEtExposeLeConflitDeTiers() {
+        Long autre = lotDeuxPieces();jdbc.update("update operation_bancaire set tiers_id=99 where id=?",op);
+        var r = service.confirmerCartes(c,lot(op,autre));
+        assertThat(r.reussis()).isEqualTo(1);assertThat(r.conflits()).isEqualTo(1);
+        assertThat(r.lignes().get(0).code()).isEqualTo("TIERS_CARTE_DIFFERENT");
+        assertThat(operations.findById(op).orElseThrow().getTiersId()).isEqualTo(99L);
+        verify(factures,times(1)).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void lotRevalideLeDisponibleEtLaPieceApresPrevisualisation() {
+        Long autre = lotDeuxPieces();service.proposerCartes(c);
+        jdbc.update("update operation_bancaire set statut_rapprochement='PARTIELLEMENT_RAPPROCHEE' where id=?",op);
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,7L)).thenReturn(List.of(
+                new FactureOuverteRapprochementDto(11L,"ACHAT",7L,"FA-11",LocalDate.now(),null,new BigDecimal("30.00"),"Pièce","SSP France")));
+        var r = service.confirmerCartes(c,lot(op,autre));
+        assertThat(r.reussis()).isZero();assertThat(r.refuses()).isEqualTo(2);
+        assertThat(r.lignes()).extracting(ConfirmationCartesResultat.Ligne::code)
+                .containsExactly("CARTE_NON_ELIGIBLE","MONTANT_SUPERIEUR_RESTE_FACTURE");
+        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void lotIsoleTenantSocieteEtExigeConsentement() {
+        carteSure();
+        assertThatThrownBy(() -> service.confirmerCartes(c,new ConfirmationCartesDemande(false,lot(op).lignes())))
+                .hasMessageContaining("Confirmez");
+        for(var autre : List.of(new ContexteRequete(999L,c.utilisateurId(),c.societeCouranteId(),c.roles(),null),
+                new ContexteRequete(c.tenantId(),c.utilisateurId(),999L,c.roles(),null))) {
+            assertThat(service.confirmerCartes(autre,lot(op)).lignes().get(0).code()).isEqualTo("OPERATION_INTROUVABLE");
+        }
+        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void lotReponsePerdueNeMasquePasAutresLignesEtReprendMemeRecu() {
+        Long autre = lotDeuxPieces();var perdre = new AtomicBoolean(true);var recus = ConcurrentHashMap.<Long>newKeySet();
+        when(factures.enregistrerPaiement(any(),any(),anyLong(),any())).thenAnswer(i -> {
+            EnregistrementPaiementFactureDto d = i.getArgument(3);recus.add(d.rapprochementId());
+            if (perdre.getAndSet(false)) throw new IllegalStateException("Réponse perdue après paiement");
+            return facture(i.getArgument(2));
+        });
+        var r = service.confirmerCartes(c,lot(op,autre));
+        assertThat(r.refuses()).isEqualTo(1);assertThat(r.reussis()).isEqualTo(1);
+        assertThat(r.lignes().get(0).code()).isEqualTo("RESULTAT_A_REPRENDRE");
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of());
+        assertThat(service.confirmerCartes(c,lot(op,autre)).reussis()).isEqualTo(2);
+        assertThat(recus).hasSize(2);assertThat(rapprochements.count()).isGreaterThanOrEqualTo(2);
+        assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE)).hasSize(1);
+        assertThat(rapprochements.findByOperationBancaireIdAndStatut(autre,StatutRapprochement.VALIDE)).hasSize(1);
+    }
+
 }
