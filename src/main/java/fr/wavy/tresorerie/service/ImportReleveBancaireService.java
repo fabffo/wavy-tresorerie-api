@@ -99,7 +99,7 @@ public class ImportReleveBancaireService {
         BigDecimal totalDebit = BigDecimal.ZERO;
         BigDecimal totalCredit = BigDecimal.ZERO;
         importReleve = importRepository.save(importReleve);
-        List<RegleClassificationOperation> reglesSalaries = reglesSalaries(contexte);
+        List<RegleClassificationOperation> reglesSalaries = classificationService.chargerRegles(contexte);
 
         // Reserve exact occurrence identities before matching historical MD5/SHA-256 rows.
         // Match legacy hashes or stored fields without rewriting historical hashes or links.

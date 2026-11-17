@@ -10,8 +10,13 @@ public record TiersTresorerieDto(
         String prenom,
         String nomNormalise,
         Boolean actif,
-        Boolean pieceRapprochementAutorisee
+        Boolean pieceRapprochementAutorisee,
+        String nomCommercial, String enseigne, String siren, String siret, String tva
 ) {
+    public TiersTresorerieDto(Long id, Set<String> roles, String raisonSociale, String nom, String prenom,
+            String nomNormalise, Boolean actif, Boolean autorisee) {
+        this(id, roles, raisonSociale, nom, prenom, nomNormalise, actif, autorisee, null, null, null, null, null);
+    }
     public String libelle() {
         if (prenom != null && !prenom.isBlank() && nom != null && !nom.isBlank()) {
             return prenom.trim() + " " + nom.trim();

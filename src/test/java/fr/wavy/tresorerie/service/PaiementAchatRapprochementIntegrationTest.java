@@ -53,6 +53,8 @@ class PaiementAchatRapprochementIntegrationTest {
     }
     @AfterEach void nettoyer() {
         jdbc.update("delete from rapprochement_bancaire where tenant_id=2903");
+        jdbc.update("delete from piece_rapprochement where tenant_id=2903");
+        jdbc.update("delete from compteur_piece_rapprochement where tenant_id=2903");
         jdbc.update("delete from operation_bancaire where tenant_id=2903");
         jdbc.update("delete from compte_bancaire where tenant_id=2903");
     }
@@ -249,7 +251,7 @@ class PaiementAchatRapprochementIntegrationTest {
     }
     @Test void automatiqueNeRepetePasLesPropositions() {
         service.rapprocherFacture(c,op);service.rapprocherFacture(c,op);
-        assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.PROPOSE)).hasSize(1);
+        assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.PROPOSE)).isEmpty();
         verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
     }
     @Test void automatiqueReprendMemeSiLaFactureEstDejaSoldeeADistance() {
@@ -400,6 +402,161 @@ class PaiementAchatRapprochementIntegrationTest {
         assertThat(recus).hasSize(2);assertThat(rapprochements.count()).isGreaterThanOrEqualTo(2);
         assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE)).hasSize(1);
         assertThat(rapprochements.findByOperationBancaireIdAndStatut(autre,StatutRapprochement.VALIDE)).hasSize(1);
+    }
+    fr.wavy.tresorerie.dto.AssistantRapprochementDto.Perimetre perimetre() {
+        return new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Perimetre(null,null,null,null,null,null);
+    }
+    void tiersAssistant(Long id,String nom,String role,boolean autorise,String tva) {
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(new TiersTresorerieDto(id,Set.of(role),nom,null,null,nom,true,autorise,null,null,null,null,tva)));
+    }
+    fr.wavy.tresorerie.dto.AssistantRapprochementDto.Apercu apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape e) {
+        return service.previsualiserAssistant(c,e,"CARTE",perimetre());
+    }
+    fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix choisir(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Apercu a,int i,boolean nature) {
+        var l=a.lignes().get(0);var p=l.candidats().get(i);
+        return new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(l.operation().id(),p.cle(),p.pieceId(),p.tiersId(),p.montantPropose(),nature,true,true);
+    }
+    fr.wavy.tresorerie.dto.AssistantRapprochementDto.Confirmation demandeAssistant(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape e,fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix... choix) {
+        return new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Confirmation(e,perimetre(),"CARTE",true,List.of(choix));
+    }
+    void impotAutorise() {
+        tiersAssistant(59L,"IMPOT SUR LE REVENU","ORGANISME_FISCAL",true,null);
+        jdbc.update("update operation_bancaire set tiers_id=59,tiers_reconnu='IMPOT SUR LE REVENU',type_tiers_reconnu='ADMINISTRATION',nature_operation='IMPOT',statut_classification='CLASSEE_AUTO',type_operation='PRELEVEMENT',libelle='IMPOT SUR LE REVENU' where id=?",op);
+    }
+    @Test void assistantAdobePrevisualiseSansEcrireEtConfirmationSepareNatureEtTiers() {
+        tiersAssistant(7L,"Adobe Systems Software Ireland Ltd","FOURNISSEUR_GENERAL",false,null);
+        jdbc.update("update operation_bancaire set tiers_id=null,tiers_reconnu=null,type_tiers_reconnu=null,nature_operation='SALAIRE',statut_classification='CLASSEE_AUTO',type_operation='PAIEMENT_CB',libelle='Paiement Adobe.com 31/01' where id=?",op);
+        var avant=operations.findById(op).orElseThrow().getDateModification();var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS);
+        assertThat(a.propositions()).isEqualTo(1);assertThat(a.lignes().get(0).candidats().get(0).natureProposee()).isEqualTo(NatureOperationBancaire.FACTURE_FOURNISSEUR);
+        assertThat(operations.findById(op).orElseThrow().getDateModification()).isEqualTo(avant);
+        assertThat(operations.findById(op).orElseThrow().getTiersId()).isNull();verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+        var choix=choisir(a,0,false);assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choix)).reussis()).isEqualTo(1);
+        assertThat(operations.findById(op).orElseThrow().getNatureOperation()).isEqualTo(NatureOperationBancaire.SALAIRE);
+        a=apercu(a.etape());assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choisir(a,0,true))).reussis()).isEqualTo(1);
+        assertThat(operations.findById(op).orElseThrow().getNatureOperation()).isEqualTo(NatureOperationBancaire.FACTURE_FOURNISSEUR);
+    }
+    @Test void assistantRespecteNatureManuelleEtFraisOpenAI() {
+        tiersAssistant(7L,"OpenAI OpCo LLC","FOURNISSEUR_GENERAL",false,null);
+        jdbc.update("update operation_bancaire set libelle='Frais carte étranger OPENAI CHATGPT',nature_operation='FRAIS_BANCAIRES',tiers_id=null where id=?",op);
+        assertThat(apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS).propositions()).isZero();
+        jdbc.update("update operation_bancaire set libelle='PAIEMENT OPENAI CHATGPT',statut_classification='CLASSEE_MANUELLE',nature_operation='APPORT_CAPITAL' where id=?",op);
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS);assertThat(a.lignes().get(0).candidats().get(0).natureProposee()).isNull();
+        assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choisir(a,0,true))).refuses()).isEqualTo(1);
+        assertThat(operations.findById(op).orElseThrow().getTiersId()).isNull();
+    }
+    @Test void assistantImpotsAutorisesCreationLotEtDoubleExecutionSansDoublon() {
+        impotAutorise();var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);
+        assertThat(a.eligibles()).isEqualTo(1);assertThat(a.lignes().get(0).candidats().get(0).typePiece()).isEqualTo("IMPOT_TAXE");
+        assertThat(jdbc.queryForObject("select count(*) from piece_rapprochement where tenant_id=2903",Integer.class)).isZero();
+        var demande=demandeAssistant(a.etape(),choisir(a,0,false));var resultat=service.confirmerAssistant(c,demande);
+        assertThat(resultat.reussis()).isEqualTo(1);assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from piece_rapprochement where tenant_id=2903",Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from rapprochement_bancaire where tenant_id=2903 and statut='VALIDE'",Integer.class)).isEqualTo(1);
+        verify(factures,never()).creerFactureAchatDepuisOperationBancaire(any(),any());
+    }
+    @Test void assistantBenomeNonAutoriseEtFactureExistanteEtTvaInconnueSontExclus() {
+        tiersAssistant(7L,"Benome","FOURNISSEUR_SERVICES",false,null);
+        assertThat(apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES).eligibles()).isZero();
+        tiersAssistant(7L,"Benome","FOURNISSEUR_SERVICES",true,"EXONERATION");jdbc.update("update operation_bancaire set type_operation='VIREMENT_EMIS' where id=?",op);
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);assertThat(a.eligibles()).isZero();assertThat(a.lignes().get(0).anomalies()).anyMatch(m -> m.contains("existante"));
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,7L)).thenReturn(List.of());tiersAssistant(7L,"Benome","FOURNISSEUR_SERVICES",true,null);
+        a=apercu(a.etape());assertThat(a.eligibles()).isZero();assertThat(a.lignes().get(0).anomalies()).anyMatch(m -> m.contains("TVA"));
+        verify(factures,never()).creerFactureAchatDepuisOperationBancaire(any(),any());
+    }
+    @Test void assistantCreationDistanteReponsePerdueGardeIntentionEtReprend() {
+        tiersAssistant(7L,"Sans TVA","FOURNISSEUR_GENERAL",true,"EXONERATION");jdbc.update("update operation_bancaire set type_operation='VIREMENT_EMIS',statut_classification='CLASSEE_AUTO' where id=?",op);
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,7L)).thenReturn(List.of());
+        var perte=new AtomicBoolean(true);var references=new HashSet<Long>();
+        when(factures.creerFactureAchatDepuisOperationBancaire(any(),any())).thenAnswer(i -> {
+            CreationFactureAchatDepuisOperationBancaireDemande d=i.getArgument(1);references.add(d.operationBancaireId());
+            if (perte.getAndSet(false)) throw new IllegalStateException("Réponse perdue après création");
+            return new FactureAchatRapprochementReponse(700L,"FA-700");
+        });
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);var demande=demandeAssistant(a.etape(),choisir(a,0,false));
+        assertThat(service.confirmerAssistant(c,demande).aReprendre()).isEqualTo(1);
+        assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.PROPOSE)).hasSize(1).allMatch(RapprochementBancaire::isPaiementEngage);
+        assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);assertThat(references).containsExactly(op);
+        assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE)).hasSize(1);
+    }
+    @Test void assistantFiltresSocieteEtDoublonsRevalidesAvantEcriture() {
+        impotAutorise();var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);var choix=choisir(a,0,false);
+        assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choix,choix)).conflits()).isEqualTo(2);
+        var filtre=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Perimetre("AUTRE TIERS",null,null,null,null,null);
+        assertThat(service.confirmerAssistant(c,new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Confirmation(a.etape(),filtre,"CARTE",true,List.of(choix))).refuses()).isEqualTo(1);
+        var autre=new ContexteRequete(c.tenantId(),c.utilisateurId(),999L,c.roles(),null);
+        assertThat(service.confirmerAssistant(autre,demandeAssistant(a.etape(),choix)).refuses()).isEqualTo(1);
+        assertThat(operations.findById(op).orElseThrow().isRapprochee()).isFalse();
+    }
+    @Test void assistantLotPartielEtAutorisationChangeeApresApercu() {
+        impotAutorise();var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);var premier=choisir(a,0,false);
+        Long autre=deuxiemeCarte();
+        var second=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(autre,"CREATION",null,999L,new BigDecimal("100.00"),false,true,true);
+        var r=service.confirmerAssistant(c,demandeAssistant(a.etape(),premier,second));assertThat(r.reussis()).isEqualTo(1);assertThat(r.refuses()).isEqualTo(1);
+        assertThat(operations.findById(autre).orElseThrow().isRapprochee()).isFalse();
+    }
+    @Test void assistantFournisseurPartielEtPiecesMultiplesSansPaiementEnPrevisualisation() {
+        tiersAssistant(7L,"Fournisseur","FOURNISSEUR_GENERAL",false,null);
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,7L)).thenReturn(List.of(
+            new FactureOuverteRapprochementDto(10L,"ACHAT",7L,"FA-10",LocalDate.of(2026,2,1),null,new BigDecimal("40.00"),"A","Fournisseur"),
+            new FactureOuverteRapprochementDto(11L,"ACHAT",7L,"FA-11",LocalDate.of(2026,2,1),null,new BigDecimal("60.00"),"B","Fournisseur")));
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.FOURNISSEURS);assertThat(a.propositions()).isEqualTo(2);
+        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+        assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choisir(a,0,false),choisir(a,1,false))).reussis()).isEqualTo(2);
+        assertThat(operations.findById(op).orElseThrow().isRapprochee()).isTrue();
+    }
+    @Test void assistantSalairePeriodeBeneficiaireEtConfirmationIndividuelleAvecRecu() {
+        tiersAssistant(7L,"Salarié","SALARIE",false,null);
+        jdbc.update("update operation_bancaire set type_tiers_reconnu='SALARIE',nature_operation='SALAIRE',type_operation='VIREMENT_EMIS',libelle='Virement salaire' where id=?",op);
+        when(factures.listerSalairesOuverts(eq(c),eq(7L),eq(2026),eq(1),isNull())).thenReturn(List.of(facture(88L)));
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.SALAIRES);assertThat(a.propositions()).isEqualTo(1);
+        assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choisir(a,0,false))).reussis()).isEqualTo(1);
+        verify(factures).enregistrerPaiement(eq(c),eq(TypeFactureRapprochement.SALAIRE),eq(88L),argThat(d -> d.rapprochementId()!=null && d.operationBancaireId().equals(op) && d.tiersId().equals(7L)));
+    }
+    @Test void assistantClientPaiementsMultiplesAvecReferencesIdempotentes() {
+        tiersAssistant(7L,"Client","CLIENT",false,null);
+        jdbc.update("update operation_bancaire set sens='CREDIT',debit=0,credit=100,type_tiers_reconnu='CLIENT',nature_operation='FACTURE_CLIENT' where id=?",op);
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.VENTE,7L)).thenReturn(List.of(
+            new FactureOuverteRapprochementDto(31L,"VENTE",7L,"FV-31",LocalDate.of(2026,2,1),null,new BigDecimal("40.00"),"A","Client"),
+            new FactureOuverteRapprochementDto(32L,"VENTE",7L,"FV-32",LocalDate.of(2026,2,1),null,new BigDecimal("60.00"),"B","Client")));
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.CLIENTS);var demande=demandeAssistant(a.etape(),choisir(a,0,false),choisir(a,1,false));
+        assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(2);
+        assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(2);
+        verify(factures,times(2)).enregistrerPaiement(eq(c),eq(TypeFactureRapprochement.VENTE),anyLong(),argThat(d -> d.rapprochementId()!=null));
+    }
+
+    @Test void formulaireNePeutPasInventerRapprochementValide() {
+        var o=operations.findById(op).orElseThrow();
+        var demande=new OperationBancaireDemande(o.getCompteBancaire().getId(),null,o.getDateOperation(),null,o.getLibelle(),null,
+            o.getDebit(),BigDecimal.ZERO,o.getMontant(),o.getSens(),o.getTypeOperation(),o.getTiersReconnu(),o.getTypeTiersReconnu(),o.getNatureOperation(),o.getStatutClassification(),StatutOperationBancaire.RAPPROCHEE,o.getTiersId(),null,null);
+        assertThatThrownBy(() -> service.modifierOperation(c,op,demande)).hasMessageContaining("service de rapprochement");
+        assertThat(operations.findById(op).orElseThrow().isRapprochee()).isFalse();verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void assistantNeCreePasSiAutorisationOuNatureChangeApresApercu() {
+        impotAutorise();var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);var d=demandeAssistant(a.etape(),choisir(a,0,false));
+        tiersAssistant(59L,"IMPOT SUR LE REVENU","ORGANISME_FISCAL",false,null);
+        assertThat(service.confirmerAssistant(c,d).refuses()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from piece_rapprochement where tenant_id=2903",Integer.class)).isZero();
+    }
+    @Test void assistantRepriseApresFiltreNonRapprocheesNeRepayePas() {
+        impotAutorise();var p=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Perimetre(null,null,null,null,StatutOperationBancaire.NON_RAPPROCHEE,null);
+        var a=service.previsualiserAssistant(c,fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES,"CARTE",p);
+        var d=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Confirmation(a.etape(),p,"CARTE",true,List.of(choisir(a,0,false)));
+        var premier=service.confirmerAssistant(c,d);assertThat(premier.reussis()).isEqualTo(1);
+        assertThat(service.confirmerAssistant(c,d).lignes().get(0).rapprochementId()).isEqualTo(premier.lignes().get(0).rapprochementId());
+    }
+    @Test void assistantPageVideNeDevientPasPerimetreGlobalEtPasDeLotClientSalaire() {
+        impotAutorise();var p=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Perimetre(null,null,null,null,null,List.of());
+        assertThat(service.previsualiserAssistant(c,fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES,"CARTE",p).operationsPerimetre()).isZero();
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);var choix=choisir(a,0,false);Long autre=deuxiemeCarte();
+        var second=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(autre,"P:SALAIRE:12",12L,59L,new BigDecimal("100"),false,true,true);
+        assertThatThrownBy(() -> service.confirmerAssistant(c,demandeAssistant(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.SALAIRES,choix,second))).hasMessageContaining("par opération");
+    }
+    @Test void assistantFraisBancairesSansInformationTvaRestentAVerifier() {
+        tiersAssistant(7L,"Banque synthétique","FOURNISSEUR_GENERAL",true,null);
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,7L)).thenReturn(List.of());
+        jdbc.update("update operation_bancaire set type_operation='FRAIS_BANCAIRES',nature_operation='FRAIS_BANCAIRES',statut_classification='CLASSEE_AUTO' where id=?",op);
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);assertThat(a.eligibles()).isZero();
+        tiersAssistant(7L,"Banque synthétique","FOURNISSEUR_GENERAL",true,"EXONERATION");assertThat(apercu(a.etape()).eligibles()).isEqualTo(1);
     }
 
 }

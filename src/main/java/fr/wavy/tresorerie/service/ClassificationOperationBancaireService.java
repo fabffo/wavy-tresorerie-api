@@ -21,11 +21,69 @@ import fr.wavy.tresorerie.modele.TypeTiersReconnu;
 @Service
 public class ClassificationOperationBancaireService {
 
+    private fr.wavy.tresorerie.client.TiersTresorerieClient tiersClient;
+    private fr.wavy.tresorerie.client.FacturesTresorerieClient facturesClient;
+    public ClassificationOperationBancaireService() {}
+    @org.springframework.beans.factory.annotation.Autowired
+    public ClassificationOperationBancaireService(fr.wavy.tresorerie.client.TiersTresorerieClient tiers,
+            fr.wavy.tresorerie.client.FacturesTresorerieClient factures) { tiersClient=tiers; facturesClient=factures; }
+
+    /** Source bancaire unique ; les règles d'import facture ne sont jamais recopiées. */
+    public List<RegleClassificationOperation> chargerRegles(fr.wavy.tresorerie.configuration.ContexteRequete c) {
+        var tiers = tiersClient.listerTiersActifs(c);
+        var regles = new java.util.ArrayList<RegleClassificationOperation>();
+        for (var r : facturesClient.listerReglesRapprochementFournisseur(c)) {
+            if (Boolean.FALSE.equals(r.actif()) || (r.typeRegle()!=null && !"OPERATION_BANCAIRE".equals(r.typeRegle()))) continue;
+            tiers.stream().filter(t -> t.id().equals(r.tiersId()) && !Boolean.FALSE.equals(t.actif())).findFirst().ifPresent(t ->
+                regles.add(new RegleClassificationOperation(t.id(), t.libelle(), typeTiers(t.roles()), r.motif(),
+                    r.typeMotif()==null ? "CONTIENT" : r.typeMotif(), r.scorePriorite()==null ? 100 : r.scorePriorite(), true,t.nom(),t.prenom())));
+        }
+        for (var t : tiers) if (t.roles()!=null && t.roles().contains("SALARIE") && !Boolean.FALSE.equals(t.actif()))
+            regles.add(new RegleClassificationOperation(t.id(),t.libelle(),TypeTiersReconnu.SALARIE,t.libelle(),"CONTIENT",1000,true,t.nom(),t.prenom()));
+        return List.copyOf(regles);
+    }
+
+    public static TypeTiersReconnu typeTiers(java.util.Set<String> roles) {
+        if (roles==null) return TypeTiersReconnu.AUTRE;
+        if (roles.contains("SALARIE")) return TypeTiersReconnu.SALARIE;
+        if (roles.contains("CLIENT")) return TypeTiersReconnu.CLIENT;
+        if (roles.contains("FOURNISSEUR_SERVICES")) return TypeTiersReconnu.FOURNISSEUR_SERVICE;
+        if (roles.contains("FOURNISSEUR_GENERAL")) return TypeTiersReconnu.FOURNISSEUR;
+        if (roles.contains("ORGANISME_FISCAL") || roles.contains("ORGANISME_SOCIAL")) return TypeTiersReconnu.ADMINISTRATION;
+        return TypeTiersReconnu.AUTRE;
+    }
+
+    /** Recherche plausible sans écriture et sans comparaison de montants. */
+    public List<fr.wavy.tresorerie.dto.TiersTresorerieDto> proposerTiers(OperationBancaire op,
+            List<RegleClassificationOperation> regles, List<fr.wavy.tresorerie.dto.TiersTresorerieDto> tiers) {
+        var nature = determinerNature(op);
+        boolean frais = nature==NatureOperationBancaire.FRAIS_BANCAIRES;
+        var resultat=reconnaitreTiersDepuisRegles(op.getLibelle(),regles);
+        if (resultat.trouve()) return tiers.stream().filter(t -> t.id().equals(resultat.tiersId()))
+            .filter(t -> !frais || normaliser(t.libelle()).contains(" BANQUE ")).toList();
+        if (resultat.ambiguite()) {
+            var ids=regles.stream().filter(r -> r.active() && correspond(normaliser(op.getLibelle()),r)).map(RegleClassificationOperation::tiersId).toList();
+            return tiers.stream().filter(t -> ids.contains(t.id())).toList();
+        }
+        if (frais) return List.of(); // Une mention du commerçant sur des frais n'identifie pas la banque.
+        var generiques=java.util.Set.of("FRANCE","IRELAND","SYSTEMS","SOFTWARE","COMPANY","UNLIMITED","LLC","LTD","SAS","SARL","OPCO","SERVICES");
+        String banque=normaliser(op.getLibelle());
+        return tiers.stream().filter(t -> !Boolean.FALSE.equals(t.actif())).filter(t -> {
+            if (t.roles()!=null && t.roles().contains("SALARIE"))
+                return banque.contains(normaliser(t.libelle())) || (t.nom()!=null && t.prenom()!=null && banque.contains(normaliser(t.nom()+" "+t.prenom())));
+            return java.util.stream.Stream.of(t.raisonSociale(),t.nomCommercial(),t.enseigne(),t.nomNormalise(),t.siren(),t.siret())
+                .filter(java.util.Objects::nonNull).flatMap(n -> java.util.Arrays.stream(normaliser(n).trim().split(" +")))
+                .filter(n -> n.length()>=3 && !generiques.contains(n))
+                .anyMatch(n -> banque.contains(" "+n+" "));
+        }).toList();
+    }
+
     public void classerAutomatiquement(OperationBancaire operation) {
         classerAutomatiquement(operation, List.of());
     }
 
     public void classerAutomatiquement(OperationBancaire operation, List<RegleClassificationOperation> regles) {
+        if (operation.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE) return;
         TiersReconnu tiers = reconnaitreTiers(operation.getLibelle(), regles);
         operation.setTiersReconnu(tiers.nom());
         operation.setTypeTiersReconnu(tiers.type());
@@ -65,8 +123,14 @@ public class ClassificationOperationBancaireService {
         if (texte.isBlank() || regles == null || regles.isEmpty()) {
             return ResultatReconnaissanceTiers.nonTrouve();
         }
+        boolean fiscal=contientUn(texte,"IMPOT","DGFIP","URSSAF","TVA");
+        boolean salaire=contientMotCleSalaire(texte) && !fiscal;
+        boolean frais=contientUn(texte,"FRAIS","COMMISSION","COTISATION BANCAIRE") && !contientUn(texte,"NOTE FRAIS","NOTE DE FRAIS","NDF","REMBOURSEMENT");
         List<CandidatReconnaissanceTiers> candidats = regles.stream()
                 .filter(RegleClassificationOperation::active)
+                .filter(r -> !fiscal || r.typeTiers()==TypeTiersReconnu.ADMINISTRATION)
+                .filter(r -> !salaire || r.typeTiers()==TypeTiersReconnu.SALARIE)
+                .filter(r -> !frais || normaliser(r.nomTiers()).contains(" BANQUE "))
                 .filter(regle -> correspond(texte, regle))
                 .map(regle -> new CandidatReconnaissanceTiers(
                         regle,
@@ -78,6 +142,14 @@ public class ClassificationOperationBancaireService {
                         .thenComparing(Comparator.comparing(CandidatReconnaissanceTiers::longueurMotif).reversed()))
                 .toList();
         if (candidats.isEmpty()) {
+            if (salaire) {
+                var salaries=regles.stream().filter(RegleClassificationOperation::active).filter(r -> r.typeTiers()==TypeTiersReconnu.SALARIE).toList();
+                var complets=salaries.stream().filter(r -> r.nom()!=null && r.prenom()!=null &&
+                    (texte.contains(normaliser(r.nom()+" "+r.prenom())) || texte.contains(normaliser(r.prenom()+" "+r.nom())))).toList();
+                if (complets.stream().map(RegleClassificationOperation::tiersId).distinct().count()>1) return ResultatReconnaissanceTiers.ambigu();
+                var reconnu=reconnaitreSalarie(texte,salaries);
+                if (reconnu.isPresent() && reconnu.get().tiersId()!=null) return ResultatReconnaissanceTiers.trouve(reconnu.get().tiersId(),reconnu.get().nom(),reconnu.get().type());
+            }
             return ResultatReconnaissanceTiers.nonTrouve();
         }
 
@@ -85,7 +157,8 @@ public class ClassificationOperationBancaireService {
         boolean ambigu = candidats.stream()
                 .skip(1)
                 .anyMatch(candidat -> candidat.priorite() == meilleur.priorite()
-                        && candidat.longueurMotif() == meilleur.longueurMotif());
+                        && candidat.longueurMotif() == meilleur.longueurMotif()
+                        && !java.util.Objects.equals(candidat.regle().tiersId(), meilleur.regle().tiersId()));
         if (ambigu) {
             return ResultatReconnaissanceTiers.ambigu();
         }
@@ -99,18 +172,10 @@ public class ClassificationOperationBancaireService {
                 .filter(RegleClassificationOperation::active)
                 .sorted(Comparator.comparing(RegleClassificationOperation::priorite).reversed())
                 .toList();
-        if (contientMotCleSalaire(texte)) {
-            Optional<TiersReconnu> salarie = reconnaitreSalarie(texte, reglesTriees);
-            if (salarie.isPresent()) {
-                return salarie.get();
-            }
-            return new TiersReconnu(null, null, null);
-        }
-        for (RegleClassificationOperation regle : reglesTriees) {
-            if (correspond(texte, regle)) {
-                return new TiersReconnu(regle.nomTiers(), regle.typeTiers(), regle.tiersId());
-            }
-        }
+        var reconnu=reconnaitreTiersDepuisRegles(libelle,reglesTriees);
+        if (reconnu.trouve()) return new TiersReconnu(reconnu.nomTiers(),reconnu.typeTiers(),reconnu.tiersId());
+        if (reconnu.ambiguite()) return new TiersReconnu(null,null,null);
+        if (contientMotCleSalaire(texte)) return reconnaitreSalarie(texte,reglesTriees).orElse(new TiersReconnu(null,null,null));
         if (texte.contains("LINKJOB")) return new TiersReconnu("LINKJOB", TypeTiersReconnu.FOURNISSEUR_SERVICE, null);
         if (texte.contains("MARIF")) return new TiersReconnu("MARIF", TypeTiersReconnu.CLIENT, null);
         if (texte.contains("FABRICE FOUGERY")) return new TiersReconnu("FABRICE FOUGERY", TypeTiersReconnu.SALARIE, null);
@@ -226,7 +291,7 @@ public class ClassificationOperationBancaireService {
         String sansAccent = Normalizer.normalize(valeur, Normalizer.Form.NFD)
                 .replaceAll("\\p{M}", "");
         return (" " + sansAccent.toUpperCase(Locale.ROOT)
-                .replaceAll("\\p{C}", " ")
+                .replaceAll("[^\\p{L}\\p{N}]+", " ")
                 .replaceAll("[\\s\\u00a0\\u202f]+", " ")
                 .trim() + " ");
     }

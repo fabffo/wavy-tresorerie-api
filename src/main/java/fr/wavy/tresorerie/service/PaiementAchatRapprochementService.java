@@ -72,9 +72,12 @@ public class PaiementAchatRapprochementService {
     }
 
     private List<FactureOuverteRapprochementDto> candidates(ContexteRequete c, OperationBancaire op, String mode) {
-        return !"CARTE_ENTREPRISE".equals(mode) && remboursement(op)
-                ? factures.listerFacturesAchatNotesFraisOuvertes(c, op.getTiersId(), null)
-                : factures.listerFacturesOuvertes(c, TypeFactureRapprochement.ACHAT, op.getTiersId());
+        if (!"CARTE_ENTREPRISE".equals(mode) && remboursement(op))
+            return factures.listerFacturesAchatNotesFraisOuvertes(c, op.getTiersId(), null);
+        var ouvertes=factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,op.getTiersId());
+        if ("CARTE_ENTREPRISE".equals(mode)) return ouvertes;
+        var cartes=factures.listerCartesOuvertes(c).stream().map(fr.wavy.tresorerie.dto.PieceCarteRapprochementDto::id).collect(java.util.stream.Collectors.toSet());
+        return ouvertes.stream().filter(f -> !cartes.contains(f.id())).toList();
     }
 
     private void verifierOperation(OperationBancaire op) {

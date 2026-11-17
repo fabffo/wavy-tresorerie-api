@@ -202,4 +202,25 @@ class ClassificationOperationBancaireServiceTest {
                 prenom
         );
     }
+    @Test void identitesBancairesConnuesSansMontantEtPonctuation() {
+        var noms=List.of("Adobe Systems Software Ireland Ltd","Microsoft France SAS","OpenAI OpCo LLC","LinkedIn Ireland Unlimited Company","Benome");
+        var libelles=List.of("Paiement Adobe.com Saggart 09/01","Paiement MICROSOFT£G134725849 10/01","Paiement OPENAI *CHATGPT SUBS 12/01","Paiement LinkedIn Recruiter 12/01","Virement BENOME BENOIT SIRA");
+        for(int i=0;i<noms.size();i++) {
+            var tiers=new fr.wavy.tresorerie.dto.TiersTresorerieDto(21L,java.util.Set.of("FOURNISSEUR_GENERAL"),noms.get(i),null,null,noms.get(i),true,false);
+            assertThat(service.proposerTiers(operation(libelles.get(i),SensOperation.DEBIT),List.of(),List.of(tiers))).containsExactly(tiers);
+        }
+    }
+    @Test void ambiguiteEtClassificationManuellePreservees() {
+        var regles=List.of(new RegleClassificationOperation(1L,"Adobe",TypeTiersReconnu.FOURNISSEUR,"ADOBE","CONTIENT",100,true),
+                          new RegleClassificationOperation(2L,"Adobe bis",TypeTiersReconnu.FOURNISSEUR,"ADOBE","CONTIENT",100,true));
+        assertThat(service.reconnaitreTiersDepuisRegles("Paiement Adobe.com",regles).ambiguite()).isTrue();
+        var op=operation("Paiement Adobe.com",SensOperation.DEBIT);op.setTiersId(99L);op.setNatureOperation(NatureOperationBancaire.COMPTE_COURANT);op.setStatutClassification(StatutClassificationOperation.CLASSEE_MANUELLE);
+        service.classerAutomatiquement(op,regles);assertThat(op.getTiersId()).isEqualTo(99L);assertThat(op.getNatureOperation()).isEqualTo(NatureOperationBancaire.COMPTE_COURANT);
+    }
+    @Test void fraisOpenAINeDesignentPasLeFournisseurMemeAvecRegleBancaire() {
+        var t=new fr.wavy.tresorerie.dto.TiersTresorerieDto(30L,java.util.Set.of("FOURNISSEUR_GENERAL"),"OpenAI OpCo LLC",null,null,null,true,false);
+        var r=new RegleClassificationOperation(30L,t.libelle(),TypeTiersReconnu.FOURNISSEUR,"OPENAI","CONTIENT",100,true);
+        assertThat(service.proposerTiers(operation("Frais carte étranger OPENAI CHATGPT",SensOperation.DEBIT),List.of(r),List.of(t))).isEmpty();
+    }
+
 }

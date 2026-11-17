@@ -39,6 +39,13 @@ public class GestionnaireExceptionGlobal {
         return ResponseEntity.badRequest().body(erreur("VALIDATION", message));
     }
 
+    @ExceptionHandler({org.springframework.http.converter.HttpMessageNotReadableException.class,
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class,
+            org.springframework.validation.BindException.class})
+    public ResponseEntity<ApiErreur> gererRequeteInvalide(Exception exception) {
+        return ResponseEntity.badRequest().body(erreur("REQUETE_INVALIDE","Corps ou paramètres invalides ; vérifiez les champs de la demande."));
+    }
+
     @ExceptionHandler(ErreurInterserviceException.class)
     public ResponseEntity<ApiErreur> gererErreurInterservice(ErreurInterserviceException exception) {
         return ResponseEntity.status(exception.getStatut())

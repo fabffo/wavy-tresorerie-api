@@ -185,6 +185,23 @@ class SecuriteRecetteTest {
                 org.mockito.ArgumentMatchers.argThat(d -> d.lignes().get(0).operationId().equals(1L)));
     }
 
+    @Test void assistantLectureEtConfirmationExigentIdentiteEtConsentement() throws Exception {
+        String url="/api/tresorerie/operations-bancaires/assistant";
+        mockMvc.perform(get(url).param("etape","TIERS")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get(url).param("etape","TIERS").param("tiersReconnu","Adobe").param("operationIds","1","2")
+                .header("Authorization","Bearer jeton-test").header("X-Tenant-Id",3).header("X-Utilisateur-Id",7).header("X-Societe-Courante-Id",11))
+                .andExpect(status().isOk());
+        org.mockito.Mockito.verify(tresorerieService).previsualiserAssistant(any(),org.mockito.ArgumentMatchers.eq(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS),
+                org.mockito.ArgumentMatchers.isNull(),org.mockito.ArgumentMatchers.argThat(p -> "Adobe".equals(p.tiersReconnu()) && p.operationIds().equals(List.of(1L,2L))));
+        for (String corps:List.of("{\"etape\":\"PIECES\",\"confirmation\":false,\"selections\":[]}",
+                "{\"etape\":\"TIERS\",\"confirmation\":true,\"selections\":[{\"operationId\":1,\"candidatCle\":\"T:21\",\"tiersId\":21,\"montant\":-1}]}")) {
+            mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(url+"/confirmer")
+                    .header("Authorization","Bearer jeton-test").header("X-Tenant-Id",3).header("X-Utilisateur-Id",7).header("X-Societe-Courante-Id",11)
+                    .contentType("application/json").content(corps)).andExpect(status().isBadRequest());
+        }
+        org.mockito.Mockito.verify(tresorerieService,org.mockito.Mockito.never()).confirmerAssistant(any(),any());
+    }
+
     private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder requeteMetier(
             long tenantId, long utilisateurId, long societeId) {
         return get("/api/tresorerie/comptes-bancaires")
