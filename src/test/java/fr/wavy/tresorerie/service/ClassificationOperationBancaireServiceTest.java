@@ -282,4 +282,19 @@ class ClassificationOperationBancaireServiceTest {
         assertThat(op.getTiersId()).isNull();
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "ELIOS DIGITAL SASU,VIR INST vers ELIOS DIGITAL SASU nouvelle reference,FOURNISSEUR_SERVICE",
+        "ADOBE.COM,PAIEMENT ADOBE.COM SAGGART 30/12,FOURNISSEUR",
+        "ALICE MEROVE,VIR SEPA ALICE MEROVE nouvelle reference,SALARIE"
+    })
+    void regleConfirmeeReconnaissableLorsDunImportUlterieur(String motif,String libelle,String type) {
+        var regle=new RegleClassificationOperation(9L,motif,TypeTiersReconnu.valueOf(type),motif,"CONTIENT",100,true);
+        var importee=operation(libelle,SensOperation.DEBIT);
+        service.classerAutomatiquement(importee,List.of(regle));
+        assertThat(importee.getTiersId()).isEqualTo(9L);
+        assertThat(importee.getTypeTiersReconnu()).isEqualTo(TypeTiersReconnu.valueOf(type));
+        assertThat(importee.isRapprochee()).isFalse();
+    }
+
 }
