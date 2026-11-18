@@ -36,7 +36,7 @@ public class ClassificationOperationBancaireService {
             if (Boolean.FALSE.equals(r.actif()) || (r.typeRegle()!=null && !"OPERATION_BANCAIRE".equals(r.typeRegle()))) continue;
             tiers.stream().filter(t -> t.id().equals(r.tiersId()) && !Boolean.FALSE.equals(t.actif())).findFirst().ifPresent(t ->
                 regles.add(new RegleClassificationOperation(t.id(), t.libelle(), typeTiers(t.roles()), r.motif(),
-                    r.typeMotif()==null ? "CONTIENT" : r.typeMotif(), r.scorePriorite()==null ? 100 : r.scorePriorite(), true,t.nom(),t.prenom())));
+                    r.typeMotif()==null ? "CONTIENT" : r.typeMotif(), r.scorePriorite()==null ? 100 : r.scorePriorite(), true,t.nom(),t.prenom(),t.roles()!=null && t.roles().contains("BANQUE"))));
         }
         for (var t : tiers) if (t.roles()!=null && t.roles().contains("SALARIE") && !Boolean.FALSE.equals(t.actif()))
             regles.add(new RegleClassificationOperation(t.id(),t.libelle(),TypeTiersReconnu.SALARIE,t.libelle(),"CONTIENT",1000,true,t.nom(),t.prenom()));
@@ -47,8 +47,8 @@ public class ClassificationOperationBancaireService {
         if (roles==null) return TypeTiersReconnu.AUTRE;
         if (roles.contains("SALARIE")) return TypeTiersReconnu.SALARIE;
         if (roles.contains("CLIENT")) return TypeTiersReconnu.CLIENT;
-        if (roles.contains("FOURNISSEUR_SERVICES")) return TypeTiersReconnu.FOURNISSEUR_SERVICE;
-        if (roles.contains("FOURNISSEUR_GENERAL")) return TypeTiersReconnu.FOURNISSEUR;
+        if (roles.contains("FOURNISSEUR_SERVICES") || roles.contains("PRESTATAIRE")) return TypeTiersReconnu.FOURNISSEUR_SERVICE;
+        if (roles.contains("FOURNISSEUR_GENERAL") || roles.contains("FOURNISSEUR") || roles.contains("MARCHAND")) return TypeTiersReconnu.FOURNISSEUR;
         if (roles.contains("ORGANISME_FISCAL") || roles.contains("ORGANISME_SOCIAL")) return TypeTiersReconnu.ADMINISTRATION;
         return TypeTiersReconnu.AUTRE;
     }
@@ -56,26 +56,32 @@ public class ClassificationOperationBancaireService {
     /** Recherche plausible sans écriture et sans comparaison de montants. */
     public List<fr.wavy.tresorerie.dto.TiersTresorerieDto> proposerTiers(OperationBancaire op,
             List<RegleClassificationOperation> regles, List<fr.wavy.tresorerie.dto.TiersTresorerieDto> tiers) {
-        var nature = determinerNature(op);
-        boolean frais = nature==NatureOperationBancaire.FRAIS_BANCAIRES;
+        boolean frais = fraisBancaires(normaliser(op.getLibelle()));
         var resultat=reconnaitreTiersDepuisRegles(op.getLibelle(),regles);
         if (resultat.trouve()) return tiers.stream().filter(t -> t.id().equals(resultat.tiersId()))
-            .filter(t -> !frais || normaliser(t.libelle()).contains(" BANQUE ")).toList();
+            .filter(t -> !frais || banque(t)).toList();
         if (resultat.ambiguite()) {
             var ids=regles.stream().filter(r -> r.active() && correspond(normaliser(op.getLibelle()),r)).map(RegleClassificationOperation::tiersId).toList();
-            return tiers.stream().filter(t -> ids.contains(t.id())).toList();
+            return tiers.stream().filter(t -> ids.contains(t.id())).filter(t -> !frais || banque(t)).toList();
         }
-        if (frais) return List.of(); // Une mention du commerçant sur des frais n'identifie pas la banque.
         var generiques=java.util.Set.of("FRANCE","IRELAND","SYSTEMS","SOFTWARE","COMPANY","UNLIMITED","LLC","LTD","SAS","SARL","OPCO","SERVICES");
         String banque=normaliser(op.getLibelle());
-        return tiers.stream().filter(t -> !Boolean.FALSE.equals(t.actif())).filter(t -> {
+        return tiers.stream().filter(t -> !Boolean.FALSE.equals(t.actif())).filter(t -> !frais || banque(t)).filter(t -> {
             if (t.roles()!=null && t.roles().contains("SALARIE"))
                 return banque.contains(normaliser(t.libelle())) || (t.nom()!=null && t.prenom()!=null && banque.contains(normaliser(t.nom()+" "+t.prenom())));
-            return java.util.stream.Stream.of(t.raisonSociale(),t.nomCommercial(),t.enseigne(),t.nomNormalise(),t.siren(),t.siret())
+            return java.util.stream.Stream.of(t.raisonSociale(),t.nomCommercial(),t.enseigne(),t.nomNormalise(),t.nom(),t.prenom(),t.siren(),t.siret())
                 .filter(java.util.Objects::nonNull).flatMap(n -> java.util.Arrays.stream(normaliser(n).trim().split(" +")))
                 .filter(n -> n.length()>=3 && !generiques.contains(n))
                 .anyMatch(n -> banque.contains(" "+n+" "));
         }).toList();
+    }
+
+    private boolean fraisBancaires(String texte) {
+        return contientUn(texte,"FRAIS","COMMISSION","COTISATION BANCAIRE") && !contientUn(texte,"NOTE FRAIS","NOTE DE FRAIS","NDF","REMBOURSEMENT");
+    }
+
+    private static boolean banque(fr.wavy.tresorerie.dto.TiersTresorerieDto t) {
+        return (t.roles()!=null && t.roles().contains("BANQUE")) || normaliser(t.libelle()).contains(" BANQUE ");
     }
 
     public void classerAutomatiquement(OperationBancaire operation) {
@@ -125,12 +131,12 @@ public class ClassificationOperationBancaireService {
         }
         boolean fiscal=contientUn(texte,"IMPOT","DGFIP","URSSAF","TVA");
         boolean salaire=contientMotCleSalaire(texte) && !fiscal;
-        boolean frais=contientUn(texte,"FRAIS","COMMISSION","COTISATION BANCAIRE") && !contientUn(texte,"NOTE FRAIS","NOTE DE FRAIS","NDF","REMBOURSEMENT");
+        boolean frais=fraisBancaires(texte);
         List<CandidatReconnaissanceTiers> candidats = regles.stream()
                 .filter(RegleClassificationOperation::active)
                 .filter(r -> !fiscal || r.typeTiers()==TypeTiersReconnu.ADMINISTRATION)
                 .filter(r -> !salaire || r.typeTiers()==TypeTiersReconnu.SALARIE)
-                .filter(r -> !frais || normaliser(r.nomTiers()).contains(" BANQUE "))
+                .filter(r -> !frais || r.banque())
                 .filter(regle -> correspond(texte, regle))
                 .map(regle -> new CandidatReconnaissanceTiers(
                         regle,
@@ -284,7 +290,7 @@ public class ClassificationOperationBancaireService {
         return normaliser(valeur).trim();
     }
 
-    private String normaliser(String valeur) {
+    private static String normaliser(String valeur) {
         if (valeur == null) {
             return "";
         }
@@ -305,8 +311,13 @@ public class ClassificationOperationBancaireService {
             int priorite,
             boolean active,
             String nom,
-            String prenom
+            String prenom,
+            boolean banque
     ) {
+        public RegleClassificationOperation(Long tiersId,String nomTiers,TypeTiersReconnu typeTiers,String motif,
+                String typeRegle,int priorite,boolean active,String nom,String prenom) {
+            this(tiersId,nomTiers,typeTiers,motif,typeRegle,priorite,active,nom,prenom,normaliser(nomTiers).contains(" BANQUE "));
+        }
         public RegleClassificationOperation(
                 Long tiersId,
                 String nomTiers,

@@ -223,4 +223,50 @@ class ClassificationOperationBancaireServiceTest {
         assertThat(service.proposerTiers(operation("Frais carte étranger OPENAI CHATGPT",SensOperation.DEBIT),List.of(r),List.of(t))).isEmpty();
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"CLIENT","MARCHAND","FOURNISSEUR_GENERAL","FOURNISSEUR_SERVICES","PRESTATAIRE","SALARIE","BANQUE","ORGANISME_SOCIAL","ORGANISME_FISCAL","CONTACT","CANDIDAT","AUTRE"})
+    void regleBancaireChargeePourToutRoleActif(String role) {
+        var tiers=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.TiersTresorerieClient.class);
+        var factures=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.FacturesTresorerieClient.class);
+        var contexte=new fr.wavy.tresorerie.configuration.ContexteRequete(1L,2L,3L,List.of(),null);
+        var t=new fr.wavy.tresorerie.dto.TiersTresorerieDto(21L,java.util.Set.of(role),"Tiers synthétique",null,null,null,true,false);
+        org.mockito.Mockito.when(tiers.listerTiersActifs(contexte)).thenReturn(List.of(t));
+        org.mockito.Mockito.when(factures.listerReglesRapprochementFournisseur(contexte)).thenReturn(List.of(
+            new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(8L,1L,3L,21L,"Alias MEROVE","MEROVE","OPERATION_BANCAIRE","CONTIENT",100,true)));
+        var classement=new ClassificationOperationBancaireService(tiers,factures);
+        var regles=classement.chargerRegles(contexte);
+        assertThat(classement.reconnaitreTiersDepuisRegles("VIR SEPA MEROVE",regles).tiersId()).isEqualTo(21L);
+        assertThat(classement.proposerTiers(operation("VIR SEPA MEROVE",SensOperation.DEBIT),regles,List.of(t))).containsExactly(t);
+        if (role.equals("SALARIE")) {
+            var op=operation("VIR SEPA MEROVE",SensOperation.DEBIT);classement.classerAutomatiquement(op,regles);
+            assertThat(op.getTypeTiersReconnu()).isEqualTo(TypeTiersReconnu.SALARIE);
+            assertThat(op.getNatureOperation()).isEqualTo(NatureOperationBancaire.SALAIRE);
+        }
+        org.mockito.Mockito.verify(tiers).listerTiersActifs(contexte);
+        org.mockito.Mockito.verify(factures).listerReglesRapprochementFournisseur(contexte);
+    }
+    @Test void ignoreImportReglesDesactiveesEtTiersInactifs() {
+        var tiers=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.TiersTresorerieClient.class);
+        var factures=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.FacturesTresorerieClient.class);
+        var contexte=new fr.wavy.tresorerie.configuration.ContexteRequete(1L,2L,3L,List.of(),null);
+        org.mockito.Mockito.when(tiers.listerTiersActifs(contexte)).thenReturn(List.of(
+            new fr.wavy.tresorerie.dto.TiersTresorerieDto(21L,java.util.Set.of("CLIENT"),"Actif",null,null,null,true,false),
+            new fr.wavy.tresorerie.dto.TiersTresorerieDto(22L,java.util.Set.of("CLIENT"),"Inactif",null,null,null,false,false)));
+        org.mockito.Mockito.when(factures.listerReglesRapprochementFournisseur(contexte)).thenReturn(List.of(
+            new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(1L,1L,3L,21L,"Import","ADOBE","IMPORT_FACTURE","CONTIENT",100,true),
+            new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(2L,1L,3L,21L,"Inactive","MEROVE","OPERATION_BANCAIRE","CONTIENT",100,false),
+            new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(3L,1L,3L,22L,"Tiers inactif","MEROVE","OPERATION_BANCAIRE","CONTIENT",100,true)));
+        assertThat(new ClassificationOperationBancaireService(tiers,factures).chargerRegles(contexte)).isEmpty();
+    }
+    @Test void banqueReconnaissableParRoleSansMotBanqueDansSonNom() {
+        var banque=new fr.wavy.tresorerie.dto.TiersTresorerieDto(1L,java.util.Set.of("BANQUE"),"Crédit Mutuel",null,null,null,true,false);
+        var marchand=new fr.wavy.tresorerie.dto.TiersTresorerieDto(2L,java.util.Set.of("MARCHAND"),"OpenAI",null,null,null,true,false);
+        var regles=List.of(new RegleClassificationOperation(1L,"Crédit Mutuel",TypeTiersReconnu.AUTRE,"FRAIS","CONTIENT",100,true,null,null,true),
+                          new RegleClassificationOperation(2L,"OpenAI",TypeTiersReconnu.FOURNISSEUR,"OPENAI","CONTIENT",100,true));
+        var op=operation("Frais carte étranger OPENAI",SensOperation.DEBIT);
+        assertThat(service.reconnaitreTiersDepuisRegles(op.getLibelle(),regles).tiersId()).isEqualTo(1L);
+        assertThat(service.proposerTiers(op,regles,List.of(banque,marchand))).containsExactly(banque);
+        assertThat(service.proposerTiers(operation("Commission Crédit Mutuel",SensOperation.DEBIT),List.of(),List.of(banque,marchand))).containsExactly(banque);
+    }
+
 }
