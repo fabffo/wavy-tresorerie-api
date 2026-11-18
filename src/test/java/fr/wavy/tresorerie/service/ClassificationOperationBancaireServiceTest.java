@@ -269,4 +269,17 @@ class ClassificationOperationBancaireServiceTest {
         assertThat(service.proposerTiers(operation("Commission Crédit Mutuel",SensOperation.DEBIT),List.of(),List.of(banque,marchand))).containsExactly(banque);
     }
 
+    @Test void propositionsConserventLesReglesDePrioritesDifferentesEtLesIdentitesPlausibles() {
+        var a=new fr.wavy.tresorerie.dto.TiersTresorerieDto(21L,java.util.Set.of("AUTRE"),"Organisation A",null,null,null,true,false);
+        var b=new fr.wavy.tresorerie.dto.TiersTresorerieDto(22L,java.util.Set.of("AUTRE"),"Organisation B",null,null,null,true,false);
+        var c=new fr.wavy.tresorerie.dto.TiersTresorerieDto(23L,java.util.Set.of("MARCHAND"),"Adobe France",null,null,null,true,false);
+        var regles=List.of(new RegleClassificationOperation(21L,"Organisation A",TypeTiersReconnu.AUTRE,"ADOBE","CONTIENT",200,true),
+                new RegleClassificationOperation(22L,"Organisation B",TypeTiersReconnu.AUTRE,"ADOBE.COM","CONTIENT",100,true));
+        var op=operation("PAIEMENT ADOBE.COM SAGGART",SensOperation.DEBIT);
+        assertThat(service.proposerTiers(op,regles,List.of(a,b,c))).containsExactly(a,b,c);
+        // La reconnaissance automatique conserve son classement existant, sans écriture lors des propositions.
+        assertThat(service.reconnaitreTiersDepuisRegles(op.getLibelle(),regles).tiersId()).isEqualTo(21L);
+        assertThat(op.getTiersId()).isNull();
+    }
+
 }

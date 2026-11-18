@@ -57,16 +57,13 @@ public class ClassificationOperationBancaireService {
     public List<fr.wavy.tresorerie.dto.TiersTresorerieDto> proposerTiers(OperationBancaire op,
             List<RegleClassificationOperation> regles, List<fr.wavy.tresorerie.dto.TiersTresorerieDto> tiers) {
         boolean frais = fraisBancaires(normaliser(op.getLibelle()));
-        var resultat=reconnaitreTiersDepuisRegles(op.getLibelle(),regles);
-        if (resultat.trouve()) return tiers.stream().filter(t -> t.id().equals(resultat.tiersId()))
-            .filter(t -> !frais || banque(t)).toList();
-        if (resultat.ambiguite()) {
-            var ids=regles.stream().filter(r -> r.active() && correspond(normaliser(op.getLibelle()),r)).map(RegleClassificationOperation::tiersId).toList();
-            return tiers.stream().filter(t -> ids.contains(t.id())).filter(t -> !frais || banque(t)).toList();
-        }
+        // Une priorité de règle ne doit pas masquer un autre tiers dans le choix utilisateur.
+        var ids=regles.stream().filter(r -> r.active() && correspond(normaliser(op.getLibelle()),r))
+                .map(RegleClassificationOperation::tiersId).collect(java.util.stream.Collectors.toSet());
         var generiques=java.util.Set.of("FRANCE","IRELAND","SYSTEMS","SOFTWARE","COMPANY","UNLIMITED","LLC","LTD","SAS","SARL","OPCO","SERVICES");
         String banque=normaliser(op.getLibelle());
         return tiers.stream().filter(t -> !Boolean.FALSE.equals(t.actif())).filter(t -> !frais || banque(t)).filter(t -> {
+            if (ids.contains(t.id())) return true;
             if (t.roles()!=null && t.roles().contains("SALARIE"))
                 return banque.contains(normaliser(t.libelle())) || (t.nom()!=null && t.prenom()!=null && banque.contains(normaliser(t.nom()+" "+t.prenom())));
             return java.util.stream.Stream.of(t.raisonSociale(),t.nomCommercial(),t.enseigne(),t.nomNormalise(),t.nom(),t.prenom(),t.siren(),t.siret())
