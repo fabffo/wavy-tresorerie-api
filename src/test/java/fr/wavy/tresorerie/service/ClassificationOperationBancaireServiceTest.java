@@ -297,4 +297,46 @@ class ClassificationOperationBancaireServiceTest {
         assertThat(importee.isRapprochee()).isFalse();
     }
 
+    @Test void benomeEnregistrePrimeSurLIdentiteImpliciteDeBenoitSiraLorsDunImport() {
+        var tiers=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.TiersTresorerieClient.class);
+        var factures=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.FacturesTresorerieClient.class);
+        var c=new fr.wavy.tresorerie.configuration.ContexteRequete(1L,2L,3L,List.of(),null);
+        var personnes=List.of(new fr.wavy.tresorerie.dto.TiersTresorerieDto(7L,java.util.Set.of("PRESTATAIRE"),"Benome",null,null,null,true,false),
+                new fr.wavy.tresorerie.dto.TiersTresorerieDto(59L,java.util.Set.of("SALARIE"),null,"Sira","Benoit",null,true,false));
+        org.mockito.Mockito.when(tiers.listerTiersActifs(c)).thenReturn(personnes);
+        org.mockito.Mockito.when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(
+                new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(1L,1L,3L,7L,"Benome","BENOME","OPERATION_BANCAIRE","CONTIENT",100,true)));
+        var moteur=new ClassificationOperationBancaireService(tiers,factures);
+        var bancaire=moteur.chargerReglesBancaires(c,personnes);
+        String libelle="Virement émis - VIR INST vers Benome Benoit Sira - wavy services Fac83 nov25 B.Sira";
+        assertThat(moteur.reconnaitreRegleUnique(libelle,bancaire).tiersId()).isEqualTo(7L);
+        assertThat(moteur.proposerTiers(operation(libelle,SensOperation.DEBIT),bancaire,personnes)).hasSize(2);
+        var nouvelle=operation(libelle,SensOperation.DEBIT);moteur.classerAutomatiquement(nouvelle,moteur.chargerRegles(c));
+        assertThat(nouvelle.getTiersId()).isEqualTo(7L);assertThat(nouvelle.isRapprochee()).isFalse();
+    }
+    @Test void deuxReglesBancairesVersDeuxTiersRestentAmbiguesMalgreLesPriorites() {
+        var a=new RegleClassificationOperation(7L,"Benome",TypeTiersReconnu.FOURNISSEUR_SERVICE,"BENOME","CONTIENT",100,true,null,null,false,true);
+        var b=new RegleClassificationOperation(59L,"Benoit Sira",TypeTiersReconnu.SALARIE,"SIRA","CONTIENT",1000,true,null,null,false,true);
+        assertThat(service.reconnaitreRegleUnique("VIR Benome Benoit Sira",List.of(a,b)).ambiguite()).isTrue();
+        var nouvelle=operation("VIR Benome Benoit Sira",SensOperation.DEBIT);service.classerAutomatiquement(nouvelle,List.of(a,b));
+        assertThat(nouvelle.getTiersId()).isNull();
+        assertThat(service.reconnaitreRegleUnique("VIR Benome",List.of(a,new RegleClassificationOperation(7L,"Benome",TypeTiersReconnu.FOURNISSEUR_SERVICE,"VIR BENOME","CONTIENT",20,true))).tiersId()).isEqualTo(7L);
+    }
+    @Test void reglesBancairesActivesDuSeulTenantEtDeLaSeuleSociete() {
+        var tiers=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.TiersTresorerieClient.class);
+        var factures=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.FacturesTresorerieClient.class);
+        var c=new fr.wavy.tresorerie.configuration.ContexteRequete(1L,2L,3L,List.of(),null);
+        var personnes=List.of(new fr.wavy.tresorerie.dto.TiersTresorerieDto(7L,java.util.Set.of("PRESTATAIRE"),"Benome",null,null,null,true,false),
+                new fr.wavy.tresorerie.dto.TiersTresorerieDto(8L,java.util.Set.of("PRESTATAIRE"),"Inactif",null,null,null,false,false));
+        org.mockito.Mockito.when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(
+                new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(1L,1L,3L,7L,"A","BENOME","OPERATION_BANCAIRE","CONTIENT",100,true),
+                new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(2L,2L,3L,7L,"B","BENOME","OPERATION_BANCAIRE","CONTIENT",100,true),
+                new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(3L,1L,4L,7L,"C","BENOME","OPERATION_BANCAIRE","CONTIENT",100,true),
+                new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(4L,1L,3L,7L,"D","BENOME","IMPORT_FACTURE","CONTIENT",100,true),
+                new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(5L,1L,3L,7L,"E","BENOME","OPERATION_BANCAIRE","CONTIENT",100,false),
+                new fr.wavy.tresorerie.dto.RegleRapprochementFournisseurFacturesDto(6L,1L,3L,8L,"F","BENOME","OPERATION_BANCAIRE","CONTIENT",100,true)));
+        var regles=new ClassificationOperationBancaireService(tiers,factures).chargerReglesBancaires(c,personnes);
+        assertThat(regles).hasSize(1);assertThat(regles.get(0).tiersId()).isEqualTo(7L);
+    }
+
 }

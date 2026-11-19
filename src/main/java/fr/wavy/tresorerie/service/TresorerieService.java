@@ -447,7 +447,7 @@ public class TresorerieService {
         var scope=operationsAssistant(c,p);
         var tiers=tiersClient.listerTiersActifs(c).stream().filter(t -> !Boolean.FALSE.equals(t.actif())).toList();
         Map<Long,TiersTresorerieDto> parTiers=tiers.stream().collect(Collectors.toMap(TiersTresorerieDto::id,Function.identity(),(a,b)->a));
-        var regles=e==Etape.TIERS ? reglesClassification(c) : List.<RegleClassificationOperation>of();
+        var regles=e==Etape.TIERS ? classificationService.chargerReglesBancaires(c,tiers) : List.<RegleClassificationOperation>of();
         var cartes=e==Etape.TIERS ? List.<PieceCarteRapprochementDto>of() : facturesClient.listerCartesOuvertes(c);
         var autresCartes=e==Etape.NOTES_FRAIS ? operationRepository.findByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochementOrderByDateOperationDescIdDesc(c.tenantId(),c.societeCouranteId(),StatutOperationBancaire.NON_RAPPROCHEE) : List.<OperationBancaire>of();
         var idsCartes=cartes.stream().map(PieceCarteRapprochementDto::id).collect(Collectors.toSet());
@@ -477,16 +477,17 @@ public class TresorerieService {
             }
             if (e==Etape.TIERS) {
                 var trouves=classificationService.proposerTiers(o,regles,tiers);
+                var unique=classificationService.reconnaitreRegleUnique(o.getLibelle(),regles);
                 for (var candidat:trouves) {
                     var natureOp=new OperationBancaire();natureOp.setLibelle(o.getLibelle());natureOp.setSens(o.getSens());
                     natureOp.setTypeTiersReconnu(ClassificationOperationBancaireService.typeTiers(candidat.roles()));
                     NatureOperationBancaire proposee=classificationService.determinerNature(natureOp);
                     boolean manuelle=o.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE;
-                    candidats.add(new Candidat("T:"+candidat.id(),candidat.id(),candidat.libelle(),natureOp.getTypeTiersReconnu(),null,null,"TIERS",
-                            BigDecimal.ZERO,BigDecimal.ZERO,null,null,trouves.size()==1 && (o.getTiersId()==null || java.util.Objects.equals(o.getTiersId(),candidat.id()))
-                                && (java.util.Objects.equals(o.getTiersId(),candidat.id()) || classificationService.reconnaitreTiersDepuisRegles(o.getLibelle(),regles).trouve()),
-                            List.of("Règle bancaire ou identité du référentiel, sans comparaison des montants"),
-                            trouves.size()>1 ? List.of("Plusieurs tiers possibles : choix explicite requis") : List.of(),
+                    boolean certaine=o.getTiersId()==null && unique.trouve() && java.util.Objects.equals(unique.tiersId(),candidat.id());
+                    candidats.add(new Candidat((certaine?"REGLE_BANCAIRE:":"T:")+candidat.id(),candidat.id(),candidat.libelle(),natureOp.getTypeTiersReconnu(),null,null,"TIERS",
+                            BigDecimal.ZERO,BigDecimal.ZERO,null,null,certaine,
+                            List.of(certaine?"Règle OPERATION_BANCAIRE active, unique et sans conflit":"Identité plausible : choix manuel"),
+                            !certaine && trouves.size()>1 ? List.of("Plusieurs tiers possibles : choix explicite requis") : List.of(),
                             !manuelle && proposee!=o.getNatureOperation() ? proposee : null,null));
                 }
                 if (trouves.isEmpty()) anomalies.add("Aucun tiers proposé : rechercher dans Tiers avant une création explicite.");
@@ -638,6 +639,9 @@ public class TresorerieService {
                 .orElseThrow(() -> new RegleMetierException("TIERS_INDISPONIBLE","Tiers actif de cette société obligatoire."));
             candidat=new Candidat(choix.candidatCle(),t.id(),t.libelle(),ClassificationOperationBancaireService.typeTiers(t.roles()),null,null,"TIERS",BigDecimal.ZERO,BigDecimal.ZERO,null,null,false,List.of("Choix manuel confirmé"),List.of(),null,null);
         }
+        boolean identificationAutomatique=demande.etape()==Etape.TIERS && choix.candidatCle().startsWith("REGLE_BANCAIRE:");
+        if(identificationAutomatique && (candidat==null || !candidat.sur() || choix.confirmerNature() || choix.pieceId()!=null || choix.montant().signum()!=0))
+            throw new RegleMetierException("REGLE_BANCAIRE_OBSOLETE","La règle n’est plus unique ou l’opération est déjà identifiée. Actualisez les propositions.");
         if (candidat==null) throw new RegleMetierException("CANDIDAT_OBSOLETE","La proposition n'est plus disponible : actualisez.");
         if (demande.etape()!=Etape.TIERS && (choix.montant().signum()<=0 || choix.montant().scale()>2 || choix.montant().compareTo(candidat.montantPropose())>0))
             throw new RegleMetierException("MONTANT_INVALIDE","Montant supérieur au solde disponible ou précision invalide.");
@@ -648,7 +652,11 @@ public class TresorerieService {
             throw new RegleMetierException("JUSTIFICATIF_REQUIS","Vérifiez les avertissements et le justificatif avant confirmation.");
         final Candidat retenu=candidat;
         if (demande.etape()==Etape.TIERS) return transactionAssistant.execute(st -> {
-            var op=trouverOperationActive(c,choix.operationId());verifierOperationModifiable(op);
+            var op=trouverOperationActive(c,choix.operationId());
+            entityManager.refresh(op,jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+            verifierOperationModifiable(op);
+            if(identificationAutomatique && op.getTiersId()!=null)
+                throw new RegleMetierException("TIERS_DEJA_IDENTIFIE","Un tiers est déjà identifié ; aucune modification automatique.");
             op.setTiersId(retenu.tiersId());op.setTiersReconnu(retenu.nomTiers());op.setTypeTiersReconnu(retenu.typeTiers());
             if (choix.confirmerNature()) {
                 if (op.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE)

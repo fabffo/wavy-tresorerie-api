@@ -31,6 +31,7 @@ class PaiementAchatRapprochementIntegrationTest {
     final ContexteRequete c=new ContexteRequete(2903L,2904L,2906L,List.of("ADMIN_TENANT"),null);
     @Autowired PaiementAchatRapprochementService paiements;
     @Autowired TresorerieService service;
+    @Autowired ImportReleveBancaireService importBancaire;
     @Autowired JdbcTemplate jdbc;
     @Autowired OperationBancaireRepository operations;
     @Autowired CompteBancaireRepository comptes;
@@ -557,6 +558,77 @@ class PaiementAchatRapprochementIntegrationTest {
         jdbc.update("update operation_bancaire set type_operation='FRAIS_BANCAIRES',nature_operation='FRAIS_BANCAIRES',statut_classification='CLASSEE_AUTO' where id=?",op);
         var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.PIECES);assertThat(a.eligibles()).isZero();
         tiersAssistant(7L,"Banque synthétique","FOURNISSEUR_GENERAL",true,"EXONERATION");assertThat(apercu(a.etape()).eligibles()).isEqualTo(1);
+    }
+
+    RegleRapprochementFournisseurFacturesDto regleBenome() {
+        return new RegleRapprochementFournisseurFacturesDto(1L,c.tenantId(),c.societeCouranteId(),7L,"Benome","BENOME","OPERATION_BANCAIRE","CONTIENT",100,true);
+    }
+    void historiqueBenome() {
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(new TiersTresorerieDto(7L,Set.of("PRESTATAIRE"),"Benome",null,null,null,true,false),
+                new TiersTresorerieDto(59L,Set.of("SALARIE"),null,"Sira","Benoit",null,true,false)));
+        when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(regleBenome()));
+        jdbc.update("update operation_bancaire set tiers_id=null,tiers_reconnu=null,type_tiers_reconnu=null,libelle='Virement émis - VIR INST vers Benome Benoit Sira - wavy services Fac83 nov25 B.Sira',nature_operation='SALAIRE',statut_classification='CLASSEE_MANUELLE',date_operation='2026-01-29' where id=?",op);
+    }
+    @Test void identificationHistoriqueLitLaRegleSansEcrirePuisConfirmeLeLotSansPaiement() {
+        historiqueBenome();var avant=operations.findById(op).orElseThrow().getDateModification();
+        var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS);
+        assertThat(a.lignes().get(0).candidats()).hasSize(2);
+        var certaine=a.lignes().get(0).candidats().stream().filter(x -> x.sur()).findFirst().orElseThrow();
+        assertThat(certaine.tiersId()).isEqualTo(7L);assertThat(certaine.cle()).isEqualTo("REGLE_BANCAIRE:7");
+        assertThat(operations.findById(op).orElseThrow().getDateModification()).isEqualTo(avant);
+        assertThat(operations.findById(op).orElseThrow().getTiersId()).isNull();
+        var choix=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(op,certaine.cle(),null,7L,BigDecimal.ZERO,false,false,false);
+        assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choix)).reussis()).isEqualTo(1);
+        var apres=operations.findById(op).orElseThrow();assertThat(apres.getTiersId()).isEqualTo(7L);
+        assertThat(apres.getNatureOperation()).isEqualTo(NatureOperationBancaire.SALAIRE);assertThat(apres.getStatutClassification()).isEqualTo(StatutClassificationOperation.CLASSEE_MANUELLE);
+        assertThat(apres.getStatutRapprochement()).isEqualTo(StatutOperationBancaire.NON_RAPPROCHEE);assertThat(apres.isRapprochee()).isFalse();
+        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+    }
+    @Test void identificationRefuseUnConflitApparuApresLaPrevisualisation() {
+        historiqueBenome();var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS);
+        var choix=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(op,"REGLE_BANCAIRE:7",null,7L,BigDecimal.ZERO,false,false,false);
+        when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(regleBenome(),
+                new RegleRapprochementFournisseurFacturesDto(2L,c.tenantId(),c.societeCouranteId(),59L,"Sira","SIRA","OPERATION_BANCAIRE","CONTIENT",1000,true)));
+        assertThat(apercu(a.etape()).lignes().get(0).candidats()).noneMatch(x -> x.sur());
+        assertThat(service.confirmerAssistant(c,demandeAssistant(a.etape(),choix)).reussis()).isZero();assertThat(operations.findById(op).orElseThrow().getTiersId()).isNull();
+    }
+    @Test void identificationNecraseJamaisUnTiersDejaRenseigne() {
+        historiqueBenome();jdbc.update("update operation_bancaire set tiers_id=59,tiers_reconnu='Benoit Sira' where id=?",op);
+        var choix=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(op,"REGLE_BANCAIRE:7",null,7L,BigDecimal.ZERO,false,false,false);
+        assertThat(service.confirmerAssistant(c,demandeAssistant(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS,choix)).reussis()).isZero();assertThat(operations.findById(op).orElseThrow().getTiersId()).isEqualTo(59L);
+    }
+    @Test void identificationVerrouilleEtRelitAvantDEcraserUneIdentificationConcurrente() {
+        historiqueBenome();var armee=new AtomicBoolean(true);
+        when(factures.listerReglesRapprochementFournisseur(c)).thenAnswer(i->{if(armee.getAndSet(false))jdbc.update("update operation_bancaire set tiers_id=59,tiers_reconnu='Benoit Sira' where id=?",op);return List.of(regleBenome());});
+        var choix=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(op,"REGLE_BANCAIRE:7",null,7L,BigDecimal.ZERO,false,false,false);
+        assertThat(service.confirmerAssistant(c,demandeAssistant(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS,choix)).reussis()).isZero();assertThat(operations.findById(op).orElseThrow().getTiersId()).isEqualTo(59L);
+    }
+    @Test void identificationGroupeeRevalideChaqueOperationEtRespecteLePerimetre() {
+        historiqueBenome();Long premiere=op;Long seconde=deuxiemeCarte();
+        jdbc.update("update operation_bancaire set tiers_id=null,tiers_reconnu=null,libelle='VIR BENOME',nature_operation='SALAIRE',statut_classification='CLASSEE_MANUELLE' where id in (?,?)",premiere,seconde);
+        var a=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(premiere,"REGLE_BANCAIRE:7",null,7L,BigDecimal.ZERO,false,false,false);
+        var b=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(seconde,"REGLE_BANCAIRE:7",null,7L,BigDecimal.ZERO,false,false,false);
+        assertThat(service.confirmerAssistant(c,demandeAssistant(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS,a,b)).reussis()).isEqualTo(2);
+        assertThat(operations.findById(premiere).orElseThrow().getStatutRapprochement()).isEqualTo(StatutOperationBancaire.NON_RAPPROCHEE);
+        var autre=new ContexteRequete(c.tenantId()+1,c.utilisateurId(),c.societeCouranteId(),List.of("ADMIN_TENANT"),null);
+        assertThat(service.previsualiserAssistant(autre,fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS,"CARTE",perimetre()).lignes()).isEmpty();
+    }
+
+    @Test void identificationBenomeDepuisUnNouveauFichierImporte() {
+        historiqueBenome();Long compte=operations.findById(op).orElseThrow().getCompteBancaire().getId();
+        String csv="Date d'opération;Libellé;Débit euros;Crédit euros\n29/01/2026;Virement émis - VIR INST vers Benome Benoit Sira - wavy services Fac83 nov25 B.Sira;10140,00;\n";
+        try {
+            var fichier=new org.springframework.mock.web.MockMultipartFile("fichier","benome.csv","text/csv",csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(importBancaire.importer(c,compte,fichier).nombreLignesImportees()).isEqualTo(1);
+            var nouvelle=operations.findByTenantIdAndSocieteInterneIdAndCompteBancaireId(c.tenantId(),c.societeCouranteId(),compte).stream()
+                    .filter(o -> !o.getId().equals(op)).findFirst().orElseThrow();
+            assertThat(nouvelle.getTiersId()).isEqualTo(7L);assertThat(nouvelle.getTiersReconnu()).isEqualTo("Benome");
+            assertThat(nouvelle.getStatutRapprochement()).isEqualTo(StatutOperationBancaire.NON_RAPPROCHEE);assertThat(nouvelle.isRapprochee()).isFalse();
+            verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+        } finally {
+            jdbc.update("delete from operation_bancaire where compte_bancaire_id=? and import_releve_bancaire_id is not null",compte);
+            jdbc.update("delete from import_releve_bancaire where compte_bancaire_id=?",compte);
+        }
     }
 
 }

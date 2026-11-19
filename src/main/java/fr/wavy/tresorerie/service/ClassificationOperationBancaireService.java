@@ -31,16 +31,33 @@ public class ClassificationOperationBancaireService {
     /** Source bancaire unique ; les règles d'import facture ne sont jamais recopiées. */
     public List<RegleClassificationOperation> chargerRegles(fr.wavy.tresorerie.configuration.ContexteRequete c) {
         var tiers = tiersClient.listerTiersActifs(c);
-        var regles = new java.util.ArrayList<RegleClassificationOperation>();
-        for (var r : facturesClient.listerReglesRapprochementFournisseur(c)) {
-            if (Boolean.FALSE.equals(r.actif()) || (r.typeRegle()!=null && !"OPERATION_BANCAIRE".equals(r.typeRegle()))) continue;
-            tiers.stream().filter(t -> t.id().equals(r.tiersId()) && !Boolean.FALSE.equals(t.actif())).findFirst().ifPresent(t ->
-                regles.add(new RegleClassificationOperation(t.id(), t.libelle(), typeTiers(t.roles()), r.motif(),
-                    r.typeMotif()==null ? "CONTIENT" : r.typeMotif(), r.scorePriorite()==null ? 100 : r.scorePriorite(), true,t.nom(),t.prenom(),t.roles()!=null && t.roles().contains("BANQUE"))));
-        }
+        var regles = new java.util.ArrayList<>(chargerReglesBancaires(c,tiers));
         for (var t : tiers) if (t.roles()!=null && t.roles().contains("SALARIE") && !Boolean.FALSE.equals(t.actif()))
             regles.add(new RegleClassificationOperation(t.id(),t.libelle(),TypeTiersReconnu.SALARIE,t.libelle(),"CONTIENT",1000,true,t.nom(),t.prenom()));
         return List.copyOf(regles);
+    }
+
+    /** Règles enregistrées uniquement : les identités implicites restent des propositions manuelles. */
+    public List<RegleClassificationOperation> chargerReglesBancaires(fr.wavy.tresorerie.configuration.ContexteRequete c,
+            List<fr.wavy.tresorerie.dto.TiersTresorerieDto> tiers) {
+        var regles = new java.util.ArrayList<RegleClassificationOperation>();
+        for (var r : facturesClient.listerReglesRapprochementFournisseur(c)) {
+            if (!Boolean.TRUE.equals(r.actif()) || !"OPERATION_BANCAIRE".equals(r.typeRegle())
+                    || !java.util.Objects.equals(r.tenantId(),c.tenantId()) || !java.util.Objects.equals(r.societeCouranteId(),c.societeCouranteId())) continue;
+            tiers.stream().filter(t -> t.id().equals(r.tiersId()) && !Boolean.FALSE.equals(t.actif())).findFirst().ifPresent(t ->
+                regles.add(new RegleClassificationOperation(t.id(), t.libelle(), typeTiers(t.roles()), r.motif(),
+                    r.typeMotif()==null ? "CONTIENT" : r.typeMotif(), r.scorePriorite()==null ? 100 : r.scorePriorite(), true,t.nom(),t.prenom(),t.roles()!=null && t.roles().contains("BANQUE"),true)));
+        }
+        return List.copyOf(regles);
+    }
+
+    /** Même reconnaissance ; une priorité ne suffit pas à automatiser deux tiers concurrents. */
+    public ResultatReconnaissanceTiers reconnaitreRegleUnique(String libelle,List<RegleClassificationOperation> regles) {
+        var ids=regles.stream().filter(RegleClassificationOperation::active)
+                .filter(r -> correspond(normaliser(libelle),r)).map(RegleClassificationOperation::tiersId).distinct().toList();
+        if(ids.size()>1)return ResultatReconnaissanceTiers.ambigu();
+        if(ids.isEmpty())return ResultatReconnaissanceTiers.nonTrouve();
+        return reconnaitreTiersDepuisRegles(libelle,regles);
     }
 
     public static TypeTiersReconnu typeTiers(java.util.Set<String> roles) {
@@ -144,6 +161,12 @@ public class ClassificationOperationBancaireService {
                         .comparing(CandidatReconnaissanceTiers::priorite).reversed()
                         .thenComparing(Comparator.comparing(CandidatReconnaissanceTiers::longueurMotif).reversed()))
                 .toList();
+        var enregistres=candidats.stream().filter(a -> a.regle().bancaireEnregistree()).toList();
+        if(!enregistres.isEmpty()) {
+            if(enregistres.stream().map(a -> a.regle().tiersId()).distinct().count()>1)return ResultatReconnaissanceTiers.ambigu();
+            // Une identité implicite ne prend jamais la place d’une règle bancaire enregistrée.
+            candidats=enregistres;
+        }
         if (candidats.isEmpty()) {
             if (salaire) {
                 var salaries=regles.stream().filter(RegleClassificationOperation::active).filter(r -> r.typeTiers()==TypeTiersReconnu.SALARIE).toList();
@@ -309,8 +332,13 @@ public class ClassificationOperationBancaireService {
             boolean active,
             String nom,
             String prenom,
-            boolean banque
+            boolean banque,
+            boolean bancaireEnregistree
     ) {
+        public RegleClassificationOperation(Long tiersId,String nomTiers,TypeTiersReconnu typeTiers,String motif,
+                String typeRegle,int priorite,boolean active,String nom,String prenom,boolean banque) {
+            this(tiersId,nomTiers,typeTiers,motif,typeRegle,priorite,active,nom,prenom,banque,false);
+        }
         public RegleClassificationOperation(Long tiersId,String nomTiers,TypeTiersReconnu typeTiers,String motif,
                 String typeRegle,int priorite,boolean active,String nom,String prenom) {
             this(tiersId,nomTiers,typeTiers,motif,typeRegle,priorite,active,nom,prenom,normaliser(nomTiers).contains(" BANQUE "));
