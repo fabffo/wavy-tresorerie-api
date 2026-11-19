@@ -13,7 +13,15 @@ public final class AssistantRapprochementDto {
     public enum Etape { TIERS, NOTES_FRAIS, SALAIRES, CLIENTS, FOURNISSEURS, PIECES }
     public record Perimetre(String tiersReconnu, TypeTiersReconnu typeTiersReconnu,
             NatureOperationBancaire natureOperation, StatutClassificationOperation statutClassification,
-            StatutOperationBancaire statutRapprochement, @Size(max=1000) List<@Positive Long> operationIds) {}
+            StatutOperationBancaire statutRapprochement, @Size(max=1000) List<@Positive Long> operationIds,
+            Long importId, String statutConsultation, Boolean consultation) {
+        public Perimetre(String tiersReconnu, TypeTiersReconnu typeTiersReconnu, NatureOperationBancaire natureOperation,
+                StatutClassificationOperation statutClassification, StatutOperationBancaire statutRapprochement, List<Long> operationIds) {
+            this(tiersReconnu, typeTiersReconnu, natureOperation, statutClassification, statutRapprochement, operationIds, null, null, null);
+        }
+    }
+    public record Compteurs(long total, long rapprochees, long partielles, long tiersIdentifies, long nonRapprochees, long sansTiers) {}
+    public record Detail(OperationBancaireReponse operation, List<RapprochementBancaireReponse> historique, BigDecimal solde) {}
     public record Candidat(String cle, Long tiersId, String nomTiers, TypeTiersReconnu typeTiers,
             Long pieceId, String numeroPiece, String typePiece, BigDecimal montantDisponible,
             BigDecimal montantPropose, LocalDate datePiece, LocalDate dateEcheance, boolean sur,

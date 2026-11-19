@@ -12,6 +12,8 @@ import fr.wavy.tresorerie.modele.StatutRapprochement;
 
 public interface RapprochementBancaireRepository extends JpaRepository<RapprochementBancaire, Long> {
     List<RapprochementBancaire> findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(Long tenantId, Long societeInterneId);
+    List<RapprochementBancaire> findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
+            Long tenantId, Long societeInterneId, Long operationBancaireId);
     Optional<RapprochementBancaire> findByIdAndTenantIdAndSocieteInterneId(Long id, Long tenantId, Long societeInterneId);
     long countByTenantIdAndSocieteInterneIdAndStatut(Long tenantId, Long societeInterneId, StatutRapprochement statut);
     List<RapprochementBancaire> findByTenantIdAndSocieteInterneIdAndStatutOrderByDateRapprochementAscIdAsc(Long tenantId, Long societeInterneId, StatutRapprochement statut);

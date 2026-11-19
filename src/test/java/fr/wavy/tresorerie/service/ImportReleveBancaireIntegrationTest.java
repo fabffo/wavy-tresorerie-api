@@ -18,6 +18,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import fr.wavy.tresorerie.client.TiersTresorerieClient;
+import fr.wavy.tresorerie.client.FacturesTresorerieClient;
+import fr.wavy.tresorerie.dto.AssistantRapprochementDto.*;
 import fr.wavy.tresorerie.configuration.ContexteRequete;
 import fr.wavy.tresorerie.dto.OperationBancaireDemande;
 import fr.wavy.tresorerie.modele.*;
@@ -36,6 +38,7 @@ class ImportReleveBancaireIntegrationTest {
     @Autowired ImportReleveBancaireRepository imports;
     @Autowired JdbcTemplate jdbc;
     @MockitoBean TiersTresorerieClient tiers;
+    @MockitoBean FacturesTresorerieClient factures;
     final ContexteRequete contexte = new ContexteRequete(7101L,7102L,7103L,List.of("ADMIN_TENANT"),null);
     Long compteId;
     final List<Long> comptesCrees = new ArrayList<>();
@@ -67,6 +70,43 @@ class ImportReleveBancaireIntegrationTest {
     List<OperationBancaire> lignes() {
         return operations.findByTenantIdAndSocieteInterneIdAndCompteBancaireId(7101L,7103L,compteId);
     }
+    @Test void consultationFiltreLImportEtCompteLesSoldesSurToutesLesPages() {
+        long ancien=service.importer(contexte,compteId,csv("ancien.csv",entetes+linkedin)).importId();
+        long dernier=service.importer(contexte,compteId,csv("dernier.csv",entetes
+                +"01/01/2026;Aucun tiers;10,00;\n02/01/2026;Identifié;20,00;\n"
+                +"03/01/2026;Partiel;30,00;\n04/01/2026;Rapproché;40,00;\n")).importId();
+        assertThat(tresorerie.listerImports(contexte).get(0).id()).isEqualTo(dernier);
+
+        for (var ligne : lignes()) {
+            switch (ligne.getLibelle()) {
+                case "Identifié" -> jdbc.update("update operation_bancaire set tiers_id=7 where id=?", ligne.getId());
+                case "Partiel", "Rapproché" -> jdbc.update("""
+                        insert into rapprochement_bancaire (tenant_id,societe_interne_id,operation_bancaire_id,montant_rapproche,statut,document_associe_numero)
+                        values (7101,7103,?,?,'VALIDE','FAC-123')
+                        """, ligne.getId(), ligne.getLibelle().equals("Partiel") ? 15 : 40);
+            }
+        }
+
+        var filtres=new Perimetre(null,null,null,null,null,null,dernier,null,true);
+        assertThat(tresorerie.compterOperations(contexte,filtres)).isEqualTo(new Compteurs(4,1,1,1,1,3));
+        assertThat(tresorerie.compterOperations(contexte,new Perimetre(null,null,null,null,null,null,ancien,null,true)).total()).isEqualTo(1);
+        assertThat(tresorerie.compterOperations(contexte,new Perimetre(null,null,null,null,null,null,null,null,true)).total()).isEqualTo(5);
+        var etranger=new ContexteRequete(contexte.tenantId(),contexte.utilisateurId(),9999L,List.of("ADMIN_TENANT"),null);
+        assertThat(tresorerie.compterOperations(etranger,filtres).total()).isZero();
+        var page=tresorerie.listerOperations(contexte,null,null,null,null,null,null,null,null,null,null,
+                null,null,null,dernier,"PARTIELLE",0,1,"statutConsultation","ASC");
+        var operation=page.getContent().get(0);
+        assertThat(page.getTotalElements()).isEqualTo(1);
+        assertThat(operation.numeroPieceAssociee()).isEqualTo("FAC-123");
+        assertThat(operation.montantRapproche()).isEqualByComparingTo("15");
+        assertThat(operation.statutRapprochement()).isEqualTo(StatutOperationBancaire.NON_RAPPROCHEE);
+        var detail=tresorerie.consulterOperation(contexte,operation.id());
+        assertThat(detail.solde()).isEqualByComparingTo("15");
+        assertThat(detail.historique()).hasSize(1);
+        assertThatThrownBy(() -> tresorerie.previsualiserAssistant(contexte,Etape.SALAIRES,"CARTE",filtres))
+                .hasMessageContaining("3 opérations restent à identifier");
+    }
+
     @Test void conserveLesOccurrencesEtReimporteSansDoublons() {
         String texte=entetes+linkedin+"13/01/2026;Autre;;10,00\n"+linkedin;
         assertThat(service.importer(contexte,compteId,csv("initial.csv",texte)).nombreLignesImportees()).isEqualTo(3);

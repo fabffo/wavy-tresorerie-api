@@ -55,8 +55,18 @@ public interface OperationBancaireRepository extends JpaRepository<OperationBanc
             """)
     BigDecimal sommeDebits(Long tenantId, Long societeInterneId);
 
-    @Query("""
-            select o
+    String STATUT_CONSULTATION = """
+            case when o.montantRapproche > 0 then
+                case when o.montantRapproche >= abs(case when o.sens = fr.wavy.tresorerie.modele.SensOperation.DEBIT
+                    then coalesce(o.debit, o.montant) else o.montant end) then 'RAPPROCHEE' else 'PARTIELLE' end
+                when o.tiersId is not null then 'TIERS_IDENTIFIE' else 'NON_RAPPROCHEE' end
+            """;
+    String FILTRES_CONSULTATION = """
+              and (:importId is null or o.importReleveBancaire.id = :importId)
+              and (:statutConsultation is null or
+            """ + STATUT_CONSULTATION + " = :statutConsultation)";
+
+    String OPERATIONS = """
             from OperationBancaire o
             where o.tenantId = :tenantId
               and o.societeInterneId = :societeInterneId
@@ -74,7 +84,10 @@ public interface OperationBancaireRepository extends JpaRepository<OperationBanc
               and (:natureOperation is null or o.natureOperation = :natureOperation)
               and (:statutClassification is null or o.statutClassification = :statutClassification)
               and (:statutRapprochement is null or o.statutRapprochement = :statutRapprochement)
-            """)
+            """ + FILTRES_CONSULTATION;
+
+    @Query("select o " + OPERATIONS + " and (:filtrerIds = false or o.id in :ids)")
+
     Page<OperationBancaire> rechercher(
             Long tenantId,
             Long societeInterneId,
@@ -91,6 +104,17 @@ public interface OperationBancaireRepository extends JpaRepository<OperationBanc
             NatureOperationBancaire natureOperation,
             StatutClassificationOperation statutClassification,
             StatutOperationBancaire statutRapprochement,
+            Long importId,
+            String statutConsultation,
+            boolean filtrerIds,
+            List<Long> ids,
             Pageable pageable
     );
+    @Query("select " + STATUT_CONSULTATION + ", count(o), sum(case when o.tiersId is null then 1 else 0 end) " + OPERATIONS
+            + " group by " + STATUT_CONSULTATION)
+    List<Object[]> compter(Long tenantId, Long societeInterneId, Long compteBancaireId,
+            LocalDate dateDebut, LocalDate dateFin, String libelle, BigDecimal montantMin, BigDecimal montantMax,
+            SensOperation sens, TypeOperationBancaire typeOperation, String tiersReconnu, TypeTiersReconnu typeTiersReconnu,
+            NatureOperationBancaire natureOperation, StatutClassificationOperation statutClassification,
+            StatutOperationBancaire statutRapprochement, Long importId, String statutConsultation);
 }

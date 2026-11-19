@@ -41,6 +41,9 @@ public record OperationBancaireReponse(
         Long factureRapprochementId,
         Boolean pieceRapprochementAutorisee,
         String libelleRapprochement,
-        LocalDateTime dateRapprochement
+        LocalDateTime dateRapprochement,
+        BigDecimal montantRapproche,
+        String numeroPieceAssociee,
+        Long pieceRapprochementId
 ) {
 }

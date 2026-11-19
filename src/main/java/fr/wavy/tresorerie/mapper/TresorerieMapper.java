@@ -71,7 +71,10 @@ public class TresorerieMapper {
                 operation.getFactureRapprochementId(),
                 pieceRapprochementAutorisee,
                 operation.getLibelleRapprochement(),
-                operation.getDateRapprochement()
+                operation.getDateRapprochement(),
+                operation.getMontantRapproche(),
+                operation.getNumeroPieceAssociee(),
+                operation.getPieceRapprochementId()
         );
     }
 

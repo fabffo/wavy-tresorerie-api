@@ -132,6 +132,8 @@ public class TresorerieControleur {
             @RequestParam(required = false) NatureOperationBancaire natureOperation,
             @RequestParam(required = false) StatutClassificationOperation statutClassification,
             @RequestParam(required = false) StatutOperationBancaire statutRapprochement,
+            @RequestParam(required = false) Long importId,
+            @RequestParam(required = false) String statutConsultation,
             @RequestParam(defaultValue = "0") Integer page,
             @RequestParam(defaultValue = "25") Integer size,
             @RequestParam(defaultValue = "dateOperation") String sortBy,
@@ -140,7 +142,17 @@ public class TresorerieControleur {
         return tresorerieService.listerOperations(
                 contexte(request), compteBancaireId, dateDebut, dateFin, libelle, montantMin, montantMax,
                 sens, typeOperation, tiersReconnu, typeTiersReconnu, natureOperation, statutClassification, statutRapprochement,
-                page, size, sortBy, sortDirection);
+                importId, statutConsultation, page, size, sortBy, sortDirection);
+    }
+
+    @GetMapping("/operations-bancaires/compteurs")
+    public Compteurs compterOperations(HttpServletRequest request, @org.springframework.web.bind.annotation.ModelAttribute Perimetre perimetre) {
+        return tresorerieService.compterOperations(contexte(request), perimetre);
+    }
+
+    @GetMapping("/operations-bancaires/{id}/detail")
+    public Detail consulterOperation(HttpServletRequest request, @PathVariable Long id) {
+        return tresorerieService.consulterOperation(contexte(request), id);
     }
 
     @GetMapping("/operations-bancaires/{id}")

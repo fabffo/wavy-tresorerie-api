@@ -70,6 +70,11 @@ public class ClassificationOperationBancaireService {
         return TypeTiersReconnu.AUTRE;
     }
 
+    static boolean roleFournisseur(java.util.Set<String> roles) {
+        return roles != null && roles.stream().anyMatch(java.util.Set.of("FOURNISSEUR", "FOURNISSEUR_GENERAL",
+                "FOURNISSEUR_SERVICES", "PRESTATAIRE", "MARCHAND", "ORGANISME_FISCAL", "ORGANISME_SOCIAL", "BANQUE")::contains);
+    }
+
     /** Recherche plausible sans écriture et sans comparaison de montants. */
     public List<fr.wavy.tresorerie.dto.TiersTresorerieDto> proposerTiers(OperationBancaire op,
             List<RegleClassificationOperation> regles, List<fr.wavy.tresorerie.dto.TiersTresorerieDto> tiers) {

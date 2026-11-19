@@ -104,6 +104,21 @@ public class OperationBancaire {
     @Column(name = "date_modification", nullable = false)
     private LocalDateTime dateModification = LocalDateTime.now();
 
+    @org.hibernate.annotations.Formula("""
+            (select coalesce(sum(r.montant_rapproche), 0) from rapprochement_bancaire r
+             where r.operation_bancaire_id = id and r.tenant_id = tenant_id
+               and r.societe_interne_id = societe_interne_id and r.statut = 'VALIDE')
+            """)
+    private BigDecimal montantRapproche;
+    @org.hibernate.annotations.Formula("""
+            (select min(coalesce(r.document_associe_numero, r.libelle_rapprochement))
+             from rapprochement_bancaire r where r.operation_bancaire_id = id and r.tenant_id = tenant_id
+               and r.societe_interne_id = societe_interne_id and r.statut = 'VALIDE')
+            """)
+    private String numeroPieceAssociee;
+
+    public BigDecimal getMontantRapproche() { return montantRapproche; }
+    public String getNumeroPieceAssociee() { return numeroPieceAssociee; }
     public Long getId() { return id; }
     public Long getTenantId() { return tenantId; }
     public void setTenantId(Long tenantId) { this.tenantId = tenantId; }

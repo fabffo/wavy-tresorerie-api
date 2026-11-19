@@ -202,6 +202,20 @@ class SecuriteRecetteTest {
         org.mockito.Mockito.verify(tresorerieService,org.mockito.Mockito.never()).confirmerAssistant(any(),any());
     }
 
+    @Test void compteursLisentLesFiltresDansLeContexteAuthentifie() throws Exception {
+        String url="/api/tresorerie/operations-bancaires/compteurs";
+        mockMvc.perform(get(url)).andExpect(status().isUnauthorized());
+        mockMvc.perform(get(url).param("importId","42").param("statutConsultation","PARTIELLE")
+                .param("tiersReconnu","Adobe").param("natureOperation","FACTURE_FOURNISSEUR")
+                .header("Authorization","Bearer jeton-test").header("X-Tenant-Id",3)
+                .header("X-Utilisateur-Id",7).header("X-Societe-Courante-Id",11))
+                .andExpect(status().isOk());
+        org.mockito.Mockito.verify(tresorerieService).compterOperations(
+                org.mockito.ArgumentMatchers.argThat(c -> c.tenantId().equals(3L) && c.societeCouranteId().equals(11L)),
+                org.mockito.ArgumentMatchers.argThat(p -> Long.valueOf(42).equals(p.importId()) && "PARTIELLE".equals(p.statutConsultation())
+                        && "Adobe".equals(p.tiersReconnu()) && "FACTURE_FOURNISSEUR".equals(p.natureOperation().name())));
+    }
+
     private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder requeteMetier(
             long tenantId, long utilisateurId, long societeId) {
         return get("/api/tresorerie/comptes-bancaires")
