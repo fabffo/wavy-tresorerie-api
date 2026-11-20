@@ -219,12 +219,64 @@ class PaiementAchatRapprochementIntegrationTest {
         assertThat(rapprochements.findById(id).orElseThrow().getStatut()).isEqualTo(StatutRapprochement.VALIDE);
     }
     @Test void remboursementRechercheLeBeneficiaireEtBloquePieceTechnique() {
+        tiersAssistant(7L, "Salarié", "SALARIE", false, null);
         jdbc.update("update operation_bancaire set nature_operation='NOTE_DE_FRAIS',type_tiers_reconnu='SALARIE',libelle='NDF remboursement salarié' where id=?",op);
         assertThat(service.listerFacturesCandidates(c,op)).extracting(FactureOuverteRapprochementDto::id).containsExactly(20L);
         assertThatThrownBy(()->service.creerPieceRapprochement(c,op)).hasMessageContaining("remboursement");
         service.rapprocherManuellement(c,op,new RapprochementManuelDemande(List.of(new LigneRapprochementManuelDemande(20L,TypeFactureRapprochement.ACHAT,new BigDecimal("100.00")))));
         verify(factures).enregistrerPaiement(eq(c),eq(TypeFactureRapprochement.ACHAT),eq(20L),argThat(d->Boolean.TRUE.equals(d.remboursementBeneficiaire())&&d.tiersId().equals(7L)));
     }
+    @Test void rapprochementManuelProposeToutesLesPeriodesEtConfirmeUnePaieEloignee() {
+        tiersAssistant(7L, "Salarié", "SALARIE", false, null);
+        jdbc.update("update operation_bancaire set nature_operation='SALAIRE',type_tiers_reconnu='SALARIE' where id=?", op);
+        var janvier = new FactureOuverteRapprochementDto(20L, "SALAIRE", 7L, "SAL-01", LocalDate.of(2026, 1, 1),
+                null, new BigDecimal("100.00"), "Paie janvier", "Salarié");
+        var novembre = new FactureOuverteRapprochementDto(21L, "SALAIRE", 7L, "SAL-11", LocalDate.of(2025, 11, 1),
+                null, new BigDecimal("100.00"), "Paie novembre", "Salarié");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.SALAIRE, 7L)).thenReturn(List.of(janvier, novembre));
+        assertThat(service.listerFacturesCandidates(c, op)).extracting(FactureOuverteRapprochementDto::numeroFacture)
+                .containsExactly("SAL-01", "SAL-11", "FA-20");
+        var demande = new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(21L, TypeFactureRapprochement.SALAIRE, new BigDecimal("100.00"))));
+        assertThat(service.rapprocherManuellement(c, op, demande).statutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+        assertThatThrownBy(() -> service.rapprocherManuellement(c, op, demande)).hasMessageContaining("plus ouverte");
+        verify(factures, times(1)).enregistrerPaiement(eq(c), eq(TypeFactureRapprochement.SALAIRE), eq(21L), any());
+    }
+
+    @Test void rapprochementManuelCarteIgnoreLaDateMaisConserveLaReservation() {
+        tiersAssistant(7L, "Marchand", "MARCHAND", false, null);
+        var carte = new FactureOuverteRapprochementDto(10L, "ACHAT", 7L, "CARTE-10", LocalDate.of(2020, 1, 1),
+                null, new BigDecimal("100.00"), "Autre libellé", "Marchand", new BigDecimal("100.00"),
+                "A_RAPPROCHER", "DEPENSE_CARTE_ENTREPRISE");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.ACHAT, 7L)).thenReturn(List.of(carte));
+        assertThat(service.listerFacturesCandidates(c, op)).containsExactly(carte);
+        var demande = new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(10L, TypeFactureRapprochement.ACHAT, new BigDecimal("100.00"))));
+        Long secondId = deuxiemeCarte();
+        jdbc.update("update operation_bancaire set tiers_id=7,type_tiers_reconnu='FOURNISSEUR' where id=?", secondId);
+        service.rapprocherManuellement(c, op, demande);
+        assertThatThrownBy(() -> service.rapprocherManuellement(c, secondId, demande)).hasMessageContaining("réserve");
+        verify(factures, times(1)).enregistrerPaiement(eq(c), eq(TypeFactureRapprochement.ACHAT), eq(10L),
+                argThat(d -> Boolean.FALSE.equals(d.remboursementBeneficiaire())));
+    }
+
+    @Test void rapprochementManuelClientRevalideLeTiersLeMontantEtLaSociete() {
+        tiersAssistant(7L, "Client", "CLIENT", false, null);
+        jdbc.update("update operation_bancaire set sens='CREDIT',credit=100,debit=0,type_tiers_reconnu='CLIENT' where id=?", op);
+        var vente = new FactureOuverteRapprochementDto(12L, "VENTE", 7L, "FV-12", LocalDate.of(2020, 1, 1),
+                null, new BigDecimal("80.00"), "Facture", "Client");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.VENTE, 7L)).thenReturn(List.of(vente));
+        var montantExcessif = new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(12L, TypeFactureRapprochement.VENTE, new BigDecimal("90.00"))));
+        assertThatThrownBy(() -> service.rapprocherManuellement(c, op, montantExcessif)).hasMessageContaining("solde de la pièce");
+        var autreSociete = new ContexteRequete(c.tenantId(), c.utilisateurId(), 999L, c.roles(), null);
+        assertThatThrownBy(() -> service.listerFacturesCandidates(autreSociete, op)).hasMessageContaining("introuvable");
+        var demande = new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(12L, TypeFactureRapprochement.VENTE, new BigDecimal("80.00"))));
+        assertThat(service.rapprocherManuellement(c, op, demande).resteARapprocher()).isEqualByComparingTo("20");
+        verify(factures, times(1)).enregistrerPaiement(eq(c), eq(TypeFactureRapprochement.VENTE), eq(12L), any());
+    }
+
     @Test void endpointGeneriqueNeContournePasLesCandidatsNiLePlafond() {
         assertThatThrownBy(()->service.creerRapprochement(c,new RapprochementBancaireDemande(op,999L,TypeFactureRapprochement.ACHAT,new BigDecimal("10.00"),null,StatutRapprochement.VALIDE,null))).hasMessageContaining("validée");
         assertThatThrownBy(()->service.creerRapprochement(c,new RapprochementBancaireDemande(op,10L,TypeFactureRapprochement.ACHAT,new BigDecimal("100.01"),null,StatutRapprochement.VALIDE,null))).hasMessageContaining("disponible");

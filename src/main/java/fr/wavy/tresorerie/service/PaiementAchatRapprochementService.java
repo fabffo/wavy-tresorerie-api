@@ -73,11 +73,26 @@ public class PaiementAchatRapprochementService {
         return candidates(c, op, null);
     }
 
+    static final String MANUEL_REMBOURSEMENT = "MANUEL_REMBOURSEMENT";
+    static final String MANUEL_FOURNISSEUR = "MANUEL_FOURNISSEUR";
+    static final String MANUEL_CARTE = "MANUEL_CARTE";
+
+    private static boolean carte(String mode) {
+        return "CARTE_ENTREPRISE".equals(mode) || MANUEL_CARTE.equals(mode);
+    }
+
+    private static boolean remboursement(OperationBancaire op, String mode) {
+        return MANUEL_REMBOURSEMENT.equals(mode)
+                || !carte(mode) && !MANUEL_FOURNISSEUR.equals(mode) && remboursement(op);
+    }
+
     private List<FactureOuverteRapprochementDto> candidates(ContexteRequete c, OperationBancaire op, String mode) {
-        if (!"CARTE_ENTREPRISE".equals(mode) && remboursement(op))
+        if (remboursement(op, mode))
             return factures.listerFacturesAchatNotesFraisOuvertes(c, op.getTiersId(), null);
         var ouvertes=factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,op.getTiersId());
-        if ("CARTE_ENTREPRISE".equals(mode)) return ouvertes;
+        if (MANUEL_CARTE.equals(mode)) return ouvertes.stream()
+                .filter(f -> "DEPENSE_CARTE_ENTREPRISE".equals(f.typePiece())).toList();
+        if (carte(mode)) return ouvertes;
         var cartes=factures.listerCartesOuvertes(c).stream().map(fr.wavy.tresorerie.dto.PieceCarteRapprochementDto::id).collect(java.util.stream.Collectors.toSet());
         return ouvertes.stream().filter(f -> !cartes.contains(f.id())).toList();
     }
@@ -85,6 +100,15 @@ public class PaiementAchatRapprochementService {
     private void verifierOperation(ContexteRequete c, OperationBancaire op, String mode) {
         if (op.isRapprochee() || op.getSens()!=SensOperation.DEBIT || op.getTiersId()==null)
             throw erreur("OPERATION_NON_ELIGIBLE", "Une opération débitrice avec un solde et un tiers est requise.");
+        if (MANUEL_REMBOURSEMENT.equals(mode) || MANUEL_FOURNISSEUR.equals(mode) || MANUEL_CARTE.equals(mode)) {
+            boolean compatible = tiers.listerTiersActifs(c).stream().anyMatch(t -> op.getTiersId().equals(t.id())
+                    && !Boolean.FALSE.equals(t.actif()) && t.roles() != null
+                    && (MANUEL_REMBOURSEMENT.equals(mode) ? t.roles().contains("SALARIE")
+                            : ClassificationOperationBancaireService.roleFournisseur(t.roles())));
+            if (!compatible || op.getStatutRapprochement() == StatutOperationBancaire.IGNOREE)
+                throw erreur("OPERATION_NON_ELIGIBLE", "Tiers actif de rôle compatible et opération non ignorée obligatoires.");
+            return;
+        }
         if (remboursement(op) || op.getTypeTiersReconnu()==TypeTiersReconnu.FOURNISSEUR
                 || op.getTypeTiersReconnu()==TypeTiersReconnu.FOURNISSEUR_SERVICE) return;
         if ("ASSISTANT".equals(mode) && tiers.listerTiersActifs(c).stream().anyMatch(t -> op.getTiersId().equals(t.id())
@@ -97,12 +121,36 @@ public class PaiementAchatRapprochementService {
         return tx(() -> preparerVerrouille(c, verrouiller(c, operationId), factureId, montant, score, libelle, mode));
     }
 
+    public void confirmerCarteManuellement(ContexteRequete c, Long operationId, Long factureId, BigDecimal montant) {
+        Long id = tx(() -> {
+            var op = verrouiller(c, operationId);
+            verrouillerPieceCarte(c, factureId);
+            verifierReservationCarte(c, operationId, factureId);
+            return preparerVerrouille(c, op, factureId, montant, 0,
+                    "CARTE-OP-" + operationId + "-FA-" + factureId, MANUEL_CARTE);
+        });
+        valider(c, id);
+    }
+
+    private void verifierReservationCarte(ContexteRequete c, Long operationId, Long factureId) {
+        boolean reservee = rapprochements.findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(c.tenantId(), c.societeCouranteId())
+                .stream().anyMatch(r -> r.getStatut() != StatutRapprochement.ANNULE
+                        && (operationId.equals(r.getOperationBancaire().getId())
+                            || r.getTypeFacture() == TypeFactureRapprochement.ACHAT && factureId.equals(r.getFactureId())));
+        if (reservee) throw erreur("CONFLIT_CARTE", "Une autre proposition ou un rapprochement réserve cette opération ou cette pièce.");
+    }
+
+    private void verrouillerPieceCarte(ContexteRequete c, Long factureId) {
+        em.createNativeQuery("select pg_advisory_xact_lock(hashtextextended(:cle, 0))")
+                .setParameter("cle", "carte:" + c.tenantId() + ":" + c.societeCouranteId() + ":" + factureId).getSingleResult();
+    }
+
     private Long preparerVerrouille(ContexteRequete c, OperationBancaire op, Long factureId, BigDecimal montant,
             int score, String libelle, String mode) {
         verifierOperation(c, op, mode);
         for (StatutRapprochement statut : List.of(StatutRapprochement.VALIDE, StatutRapprochement.PROPOSE)) {
             for (RapprochementBancaire r : rapprochements.findByOperationBancaireIdAndStatut(op.getId(), statut)) {
-                if ("CARTE_ENTREPRISE".equals(r.getModeRapprochement()) != "CARTE_ENTREPRISE".equals(mode))
+                if (carte(r.getModeRapprochement()) != carte(mode))
                     throw erreur("CONFLIT_NATURE", "Une affectation carte et une affectation sur facture classique ne peuvent pas se cumuler.");
                 if (r.getTypeFacture() != TypeFactureRapprochement.ACHAT || !Objects.equals(r.getFactureId(), factureId)) continue;
                 if (statut == StatutRapprochement.VALIDE) throw erreur("RAPPROCHEMENT_DEJA_VALIDE", "Ce couple opération–facture est déjà validé.");
@@ -116,6 +164,10 @@ public class PaiementAchatRapprochementService {
                 .orElseThrow(() -> erreur("FACTURE_NON_CANDIDATE", "Facture validée, tiers et type de pièce cohérents obligatoires."));
         if (montant.compareTo(facture.resteAPayer()) > 0)
             throw erreur("MONTANT_SUPERIEUR_RESTE_FACTURE", "Le montant dépasse le reste à payer.");
+        if (MANUEL_CARTE.equals(mode) && (montantOperation(op).subtract(facture.resteAPayer()).abs()
+                .compareTo(new BigDecimal("0.01")) > 0 || montant.compareTo(montantOperation(op).min(facture.resteAPayer())) != 0))
+            throw erreur("MONTANT_CARTE_INCOMPATIBLE", "Le montant carte doit correspondre au disponible à un centime près.");
+
         RapprochementBancaire r = new RapprochementBancaire();
         r.setTenantId(c.tenantId()); r.setSocieteInterneId(c.societeCouranteId()); r.setOperationBancaire(op);
         r.setFactureId(factureId); r.setTypeFacture(TypeFactureRapprochement.ACHAT); r.setTypePiece(TypePieceRapprochement.FACTURE_ACHAT);
@@ -173,8 +225,7 @@ public class PaiementAchatRapprochementService {
             OperationBancaire op = verrouiller(c, operationId);
             // Même verrou transactionnel PostgreSQL que les reçus Factures : deux opérations
             // ne peuvent pas réserver simultanément la même pièce dans ce parcours.
-            em.createNativeQuery("select pg_advisory_xact_lock(hashtextextended(:cle, 0))")
-                    .setParameter("cle", "carte:" + c.tenantId() + ":" + c.societeCouranteId() + ":" + demande.factureId()).getSingleResult();
+            verrouillerPieceCarte(c, demande.factureId());
             var enCours = rapprochements.findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(c.tenantId(), c.societeCouranteId());
             for (var r : enCours) {
                 if (r.getStatut() != StatutRapprochement.PROPOSE && r.getStatut() != StatutRapprochement.VALIDE) continue;
@@ -260,7 +311,7 @@ public class PaiementAchatRapprochementService {
             verifierProposition(r); verifierOperation(c, op, r.getModeRapprochement()); verifierDisponible(op, r.getMontantRapproche(), id);
             factures.enregistrerPaiement(c, TypeFactureRapprochement.ACHAT, r.getFactureId(),
                     new EnregistrementPaiementFactureDto(r.getMontantRapproche(), op.getDateOperation(),
-                            r.getLibelleRapprochement(), op.getId(), r.getId(), op.getTiersId(), !"CARTE_ENTREPRISE".equals(r.getModeRapprochement()) && remboursement(op)));
+                            r.getLibelleRapprochement(), op.getId(), r.getId(), op.getTiersId(), remboursement(op, r.getModeRapprochement())));
             r.setStatut(StatutRapprochement.VALIDE); r.setDateValidation(LocalDateTime.now()); r.setUtilisateurValidationId(c.utilisateurId());
             BigDecimal total = rapprochements.sommeMontantParOperationEtStatut(op.getId(), StatutRapprochement.VALIDE);
             // La requête déclenche le flush du passage à VALIDE.
