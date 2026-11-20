@@ -21,6 +21,9 @@ import fr.wavy.tresorerie.modele.TypeTiersReconnu;
 @Service
 public class ClassificationOperationBancaireService {
 
+    private static final Pattern VIREMENT_BENEFICIAIRE =
+            Pattern.compile("^ (?:VIR|VIREMENT) (?:(?:EMIS|VIR|INST|SEPA|INSTANTANE) )*(?:VERS|POUR) ");
+
     private fr.wavy.tresorerie.client.TiersTresorerieClient tiersClient;
     private fr.wavy.tresorerie.client.FacturesTresorerieClient facturesClient;
     public ClassificationOperationBancaireService() {}
@@ -96,7 +99,10 @@ public class ClassificationOperationBancaireService {
     }
 
     private boolean fraisBancaires(String texte) {
-        return contientUn(texte,"FRAIS","COMMISSION","COTISATION BANCAIRE") && !contientUn(texte,"NOTE FRAIS","NOTE DE FRAIS","NDF","REMBOURSEMENT");
+        // Les mentions de frais dans le motif d'un virement à un bénéficiaire ne sont pas des frais de banque.
+        return contientUn(texte,"FRAIS","COMMISSION","COTISATION BANCAIRE")
+                && !contientUn(texte,"NOTE FRAIS","NOTE DE FRAIS","NDF","REMBOURSEMENT")
+                && !VIREMENT_BENEFICIAIRE.matcher(texte).lookingAt();
     }
 
     private static boolean banque(fr.wavy.tresorerie.dto.TiersTresorerieDto t) {

@@ -683,6 +683,74 @@ class PaiementAchatRapprochementIntegrationTest {
         assertThat(service.previsualiserAssistant(autre,fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS,"CARTE",perimetre()).lignes()).isEmpty();
     }
 
+    @Test void identificationDuSalarieSurUnVirementDeFraisDansSonImport() {
+        String libelle = "Virement émis - VIR INST vers JEAN MARIE NIENGEL frais Rouen JMNiengele dec25";
+        Long compte = operations.findById(op).orElseThrow().getCompteBancaire().getId();
+        var salarie = new TiersTresorerieDto(4L, Set.of("SALARIE", "PORTEUR_CARTE"), null,
+                "Niengele", "Jean-Marie", null, true, false);
+        var concurrent = new TiersTresorerieDto(5L, Set.of("AUTRE"), "Autre bénéficiaire", null, null, null, true, false);
+        var regle = new RegleRapprochementFournisseurFacturesDto(1L, c.tenantId(), c.societeCouranteId(),
+                4L, "Alias bancaire", "JEAN MARIE NIENGEL", "OPERATION_BANCAIRE", "CONTIENT", 100, true);
+        var inactive = new RegleRapprochementFournisseurFacturesDto(2L, c.tenantId(), c.societeCouranteId(),
+                4L, "Alias bancaire", "JEAN MARIE NIENGEL", "OPERATION_BANCAIRE", "CONTIENT", 100, false);
+        var autreSociete = new RegleRapprochementFournisseurFacturesDto(3L, c.tenantId(), c.societeCouranteId()+1,
+                5L, "Autre société", "NIENGEL", "OPERATION_BANCAIRE", "CONTIENT", 300, true);
+        var autreTenant = new RegleRapprochementFournisseurFacturesDto(4L, c.tenantId()+1, c.societeCouranteId(),
+                5L, "Autre tenant", "NIENGEL", "OPERATION_BANCAIRE", "CONTIENT", 300, true);
+        var regleConcurrente = new RegleRapprochementFournisseurFacturesDto(5L, c.tenantId(), c.societeCouranteId(),
+                5L, "Règle concurrente", "FRAIS ROUEN", "OPERATION_BANCAIRE", "CONTIENT", 300, true);
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(salarie, concurrent));
+        when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(inactive, autreSociete, autreTenant));
+        String csv = "Date d'opération;Libellé;Débit euros;Crédit euros\n15/01/2026;" + libelle + ";270,27;\n";
+        var fichier = new org.springframework.mock.web.MockMultipartFile("fichier", "frais.csv", "text/csv",
+                csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        try {
+            long importId = importBancaire.importer(c, compte, fichier).importId();
+            var scope = new Perimetre(null,null,null,null,null,null,importId,null,true);
+            var avant = service.previsualiserAssistant(c, Etape.TIERS, "CARTE", scope).lignes().get(0);
+            assertThat(avant.operation().tiersId()).isNull();
+            assertThat(avant.candidats()).isEmpty();
+            long id = avant.operation().id();
+            assertThat(avant.operation().dateOperation()).isEqualTo(LocalDate.of(2026, 1, 15));
+
+            when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(regle, regleConcurrente));
+            var conflit = service.previsualiserAssistant(c, Etape.TIERS, "CARTE", scope).lignes().get(0);
+            assertThat(conflit.candidats()).extracting(Candidat::tiersId).containsExactlyInAnyOrder(4L, 5L);
+            assertThat(conflit.candidats()).noneMatch(Candidat::sur);
+
+            when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(regle, autreSociete, autreTenant));
+            var apercu = service.previsualiserAssistant(c, Etape.TIERS, "CARTE", scope);
+            var individuel = new Perimetre(null,null,null,null,null,List.of(id),importId,null,true);
+            var propositions = apercu.lignes().get(0).candidats();
+            assertThat(propositions).singleElement().satisfies(candidat -> {
+                assertThat(candidat.cle()).isEqualTo("REGLE_BANCAIRE:4");
+                assertThat(candidat.nomTiers()).contains("Jean-Marie", "Niengele");
+                assertThat(candidat.typeTiers()).isEqualTo(TypeTiersReconnu.SALARIE);
+                assertThat(candidat.sur()).isTrue();
+            });
+            assertThat(service.previsualiserAssistant(c, Etape.TIERS, "CARTE", individuel).lignes().get(0).candidats())
+                    .containsExactlyElementsOf(propositions);
+            assertThat(service.previsualiserAssistant(c, Etape.TIERS, "CARTE",
+                    new Perimetre(null,null,null,null,null,List.of(id),importId+1,null,true)).lignes()).isEmpty();
+            assertThat(apercu.lignes().get(0).operation().pieceRapprochementAutorisee()).isFalse();
+            assertThat(operations.findById(id).orElseThrow().getTiersId()).isNull();
+
+            var demande = new Confirmation(Etape.TIERS, scope, "CARTE", true, List.of(choisir(apercu,0,false)));
+            assertThat(service.confirmerAssistant(c, demande).reussis()).isEqualTo(1);
+            var apres = operations.findById(id).orElseThrow();
+            assertThat(apres.getTiersId()).isEqualTo(4L);
+            assertThat(apres.getMontant()).isEqualByComparingTo(avant.operation().montant());
+            assertThat(apres.getNatureOperation()).isEqualTo(avant.operation().natureOperation());
+            assertThat(apres.getStatutRapprochement()).isEqualTo(avant.operation().statutRapprochement());
+            assertThat(service.previsualiserAssistant(c, Etape.TIERS, "CARTE", scope).lignes()).isEmpty();
+            assertThat(rapprochements.findByOperationBancaireIdAndStatut(id, StatutRapprochement.VALIDE)).isEmpty();
+            verify(factures, never()).enregistrerPaiement(any(), any(), anyLong(), any());
+        } finally {
+            jdbc.update("delete from operation_bancaire where compte_bancaire_id=? and import_releve_bancaire_id is not null",compte);
+            jdbc.update("delete from import_releve_bancaire where compte_bancaire_id=?",compte);
+        }
+    }
+
     @Test void identificationBenomeDepuisUnNouveauFichierImporte() {
         historiqueBenome();Long compte=operations.findById(op).orElseThrow().getCompteBancaire().getId();
         String csv="Date d'opération;Libellé;Débit euros;Crédit euros\n29/01/2026;Virement émis - VIR INST vers Benome Benoit Sira - wavy services Fac83 nov25 B.Sira;10140,00;\n";

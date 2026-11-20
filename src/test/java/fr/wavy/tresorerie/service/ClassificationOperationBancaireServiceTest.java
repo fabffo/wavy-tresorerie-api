@@ -224,7 +224,7 @@ class ClassificationOperationBancaireServiceTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings={"CLIENT","MARCHAND","FOURNISSEUR_GENERAL","FOURNISSEUR_SERVICES","PRESTATAIRE","SALARIE","BANQUE","ORGANISME_SOCIAL","ORGANISME_FISCAL","CONTACT","CANDIDAT","AUTRE"})
+    @org.junit.jupiter.params.provider.ValueSource(strings={"CLIENT","MARCHAND","FOURNISSEUR_GENERAL","FOURNISSEUR_SERVICES","PRESTATAIRE","SALARIE","PORTEUR_CARTE","BANQUE","ORGANISME_SOCIAL","ORGANISME_FISCAL","CONTACT","CANDIDAT","AUTRE"})
     void regleBancaireChargeePourToutRoleActif(String role) {
         var tiers=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.TiersTresorerieClient.class);
         var factures=org.mockito.Mockito.mock(fr.wavy.tresorerie.client.FacturesTresorerieClient.class);
