@@ -641,7 +641,7 @@ class PaiementAchatRapprochementIntegrationTest {
     @Test void identificationHistoriqueLitLaRegleSansEcrirePuisConfirmeLeLotSansPaiement() {
         historiqueBenome();var avant=operations.findById(op).orElseThrow().getDateModification();
         var a=apercu(fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.TIERS);
-        assertThat(a.lignes().get(0).candidats()).hasSize(2);
+        assertThat(a.lignes().get(0).candidats()).hasSize(1);
         var certaine=a.lignes().get(0).candidats().stream().filter(x -> x.sur()).findFirst().orElseThrow();
         assertThat(certaine.tiersId()).isEqualTo(7L);assertThat(certaine.cle()).isEqualTo("REGLE_BANCAIRE:7");
         assertThat(operations.findById(op).orElseThrow().getDateModification()).isEqualTo(avant);
@@ -749,6 +749,68 @@ class PaiementAchatRapprochementIntegrationTest {
             jdbc.update("delete from operation_bancaire where compte_bancaire_id=? and import_releve_bancaire_id is not null",compte);
             jdbc.update("delete from import_releve_bancaire where compte_bancaire_id=?",compte);
         }
+    }
+
+    @Test void lotCertainSurDeuxImportsEcarteCasdenEtBredEtActualiseLesCompteurs() {
+        Long compte = operations.findById(op).orElseThrow().getCompteBancaire().getId();
+        var salarie = new TiersTresorerieDto(4L, Set.of("SALARIE", "PORTEUR_CARTE"), null,
+                "Niengele", "Jean-Marie", null, true, false);
+        var ecole = new TiersTresorerieDto(6L, Set.of("CLIENT"), "École Supérieure de la Banque", null, null, null, true, false);
+        var casden = new TiersTresorerieDto(8L, Set.of("BANQUE"), "CASDEN", null, null, null, true, false);
+        var bred = new TiersTresorerieDto(9L, Set.of("BANQUE"), "BRED Banque Populaire", null, null, null, true, false);
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(salarie, ecole, casden, bred));
+        when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of());
+
+        try {
+            long premier = importerPourIdentification(compte, "salarie.csv",
+                    "15/01/2026;Virement émis - VIR INST vers JEAN MARIE NIENGEL frais Rouen CASDEN;270,27;");
+            long second = importerPourIdentification(compte, "ecole.csv",
+                    "15/01/2026;Virement reçu ÉCOLE SUPÉRIEURE DE LA BANQUE BRED BANQUE POPULAIRE;;42,00");
+            assertThat(premier).isNotEqualTo(second);
+            var sansRegles = service.previsualiserAssistant(c, Etape.TIERS, "CARTE", consultation());
+            assertThat(sansRegles.lignes().stream().flatMap(l -> l.candidats().stream()).map(Candidat::tiersId))
+                    .contains(8L, 9L);
+            when(factures.listerReglesRapprochementFournisseur(c)).thenReturn(List.of(
+                    reglePourIdentification(101L, 4L, "JEAN MARIE NIENGEL"),
+                    reglePourIdentification(102L, 4L, "NIENGEL FRAIS ROUEN"),
+                    reglePourIdentification(103L, 6L, "ÉCOLE SUPÉRIEURE DE LA BANQUE")));
+
+            var apercu = service.previsualiserAssistant(c, Etape.TIERS, "CARTE", consultation());
+            assertThat(apercu.lignes()).hasSize(2).allSatisfy(l ->
+                    assertThat(l.candidats()).singleElement().matches(Candidat::sur));
+            assertThat(apercu.lignes().stream().map(l -> l.candidats().get(0).tiersId()))
+                    .containsExactlyInAnyOrder(4L, 6L);
+            var choix = apercu.lignes().stream().map(l -> {
+                var candidat = l.candidats().get(0);
+                return new Choix(l.operation().id(), candidat.cle(), null, candidat.tiersId(), BigDecimal.ZERO, false, false, false);
+            }).toList();
+            var demande = new Confirmation(Etape.TIERS, consultation(), "CARTE", true, choix);
+            assertThat(service.compterOperations(c, consultation()).sansTiers()).isEqualTo(2);
+            var etranger = new ContexteRequete(c.tenantId(), c.utilisateurId(), c.societeCouranteId()+1, List.of("ADMIN_TENANT"), null);
+            assertThat(service.confirmerAssistant(etranger, demande).reussis()).isZero();
+            assertThat(service.confirmerAssistant(c, demande).reussis()).isEqualTo(2);
+            assertThat(service.compterOperations(c, consultation()).sansTiers()).isZero();
+            assertThat(service.compterOperations(c, consultation()).tiersIdentifies()).isEqualTo(3);
+            assertThat(service.previsualiserAssistant(c, Etape.TIERS, "CARTE", consultation()).lignes()).isEmpty();
+            assertThat(operations.findById(op).orElseThrow().getTiersId()).isEqualTo(7L);
+            assertThat(service.confirmerAssistant(c, demande).reussis()).isZero();
+            verify(factures, never()).enregistrerPaiement(any(), any(), anyLong(), any());
+        } finally {
+            jdbc.update("delete from operation_bancaire where compte_bancaire_id=? and import_releve_bancaire_id is not null",compte);
+            jdbc.update("delete from import_releve_bancaire where compte_bancaire_id=?",compte);
+        }
+    }
+
+    private long importerPourIdentification(Long compte, String nom, String ligneCsv) {
+        String csv = "Date d'opération;Libellé;Débit euros;Crédit euros\n" + ligneCsv + "\n";
+        var fichier = new org.springframework.mock.web.MockMultipartFile("fichier", nom, "text/csv",
+                csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return importBancaire.importer(c, compte, fichier).importId();
+    }
+
+    private RegleRapprochementFournisseurFacturesDto reglePourIdentification(Long id, Long tiersId, String motif) {
+        return new RegleRapprochementFournisseurFacturesDto(id, c.tenantId(), c.societeCouranteId(), tiersId,
+                motif, motif, "OPERATION_BANCAIRE", "CONTIENT", 100, true);
     }
 
     @Test void identificationBenomeDepuisUnNouveauFichierImporte() {

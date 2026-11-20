@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -56,11 +57,17 @@ public class ClassificationOperationBancaireService {
 
     /** Même reconnaissance ; une priorité ne suffit pas à automatiser deux tiers concurrents. */
     public ResultatReconnaissanceTiers reconnaitreRegleUnique(String libelle,List<RegleClassificationOperation> regles) {
-        var ids=regles.stream().filter(RegleClassificationOperation::active)
-                .filter(r -> correspond(normaliser(libelle),r)).map(RegleClassificationOperation::tiersId).distinct().toList();
+        var ids = tiersDesReglesCorrespondantes(libelle, regles);
         if(ids.size()>1)return ResultatReconnaissanceTiers.ambigu();
         if(ids.isEmpty())return ResultatReconnaissanceTiers.nonTrouve();
         return reconnaitreTiersDepuisRegles(libelle,regles);
+    }
+
+    Set<Long> tiersDesReglesCorrespondantes(String libelle, List<RegleClassificationOperation> regles) {
+        String texte = normaliser(libelle);
+        return regles.stream().filter(RegleClassificationOperation::active)
+                .filter(regle -> correspond(texte, regle))
+                .map(RegleClassificationOperation::tiersId).collect(Collectors.toSet());
     }
 
     public static TypeTiersReconnu typeTiers(java.util.Set<String> roles) {
@@ -83,8 +90,7 @@ public class ClassificationOperationBancaireService {
             List<RegleClassificationOperation> regles, List<fr.wavy.tresorerie.dto.TiersTresorerieDto> tiers) {
         boolean frais = fraisBancaires(normaliser(op.getLibelle()));
         // Une priorité de règle ne doit pas masquer un autre tiers dans le choix utilisateur.
-        var ids=regles.stream().filter(r -> r.active() && correspond(normaliser(op.getLibelle()),r))
-                .map(RegleClassificationOperation::tiersId).collect(java.util.stream.Collectors.toSet());
+        var ids = tiersDesReglesCorrespondantes(op.getLibelle(), regles);
         var generiques=java.util.Set.of("FRANCE","IRELAND","SYSTEMS","SOFTWARE","COMPANY","UNLIMITED","LLC","LTD","SAS","SARL","OPCO","SERVICES");
         String banque=normaliser(op.getLibelle());
         return tiers.stream().filter(t -> !Boolean.FALSE.equals(t.actif())).filter(t -> !frais || banque(t)).filter(t -> {

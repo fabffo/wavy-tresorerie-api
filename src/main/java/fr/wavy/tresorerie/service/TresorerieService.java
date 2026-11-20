@@ -572,8 +572,16 @@ public class TresorerieService {
                 continue;
             }
             if (etape==Etape.TIERS) {
-                var trouves=classificationService.proposerTiers(o,regles,tiers);
                 var unique=classificationService.reconnaitreRegleUnique(o.getLibelle(),regles);
+                List<TiersTresorerieDto> trouves;
+                if (o.getTiersId()==null && unique.trouve()) {
+                    trouves = List.of(parTiers.get(unique.tiersId()));
+                } else if (o.getTiersId()==null && unique.ambiguite()) {
+                    var ids = classificationService.tiersDesReglesCorrespondantes(o.getLibelle(), regles);
+                    trouves = tiers.stream().filter(tiersCandidat -> ids.contains(tiersCandidat.id())).toList();
+                } else {
+                    trouves = classificationService.proposerTiers(o,regles,tiers);
+                }
                 for (var candidat:trouves) {
                     var natureOp=new OperationBancaire();natureOp.setLibelle(o.getLibelle());natureOp.setSens(o.getSens());
                     natureOp.setTypeTiersReconnu(ClassificationOperationBancaireService.typeTiers(candidat.roles()));
