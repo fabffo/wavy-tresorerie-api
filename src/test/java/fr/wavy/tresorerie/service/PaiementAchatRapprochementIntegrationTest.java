@@ -277,6 +277,72 @@ class PaiementAchatRapprochementIntegrationTest {
         verify(factures, times(1)).enregistrerPaiement(eq(c), eq(TypeFactureRapprochement.VENTE), eq(12L), any());
     }
 
+    @Test void annulationPaieRejoueLeMemeRecuApresUneReponsePerduePuisPermetLeRapprochementManuel() {
+        tiersAssistant(7L, "Salarié fictif", "SALARIE", false, null);
+        jdbc.update("update operation_bancaire set nature_operation='SALAIRE',type_tiers_reconnu='SALARIE' where id=?", op);
+        var janvier = new FactureOuverteRapprochementDto(31L, "SALAIRE", 7L, "PAIE-01", LocalDate.of(2026, 1, 1),
+                null, new BigDecimal("100.00"), "Salaire janvier", "Salarié fictif");
+        var novembre = new FactureOuverteRapprochementDto(32L, "SALAIRE", 7L, "PAIE-11", LocalDate.of(2025, 11, 1),
+                null, new BigDecimal("100.00"), "Salaire novembre", "Salarié fictif");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.SALAIRE, 7L)).thenReturn(List.of(janvier, novembre));
+        service.rapprocherManuellement(c, op, new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(31L, TypeFactureRapprochement.SALAIRE, new BigDecimal("100.00")))));
+        var initial = rapprochements.findByOperationBancaireIdAndStatut(op, StatutRapprochement.VALIDE).get(0);
+        var demande = new AnnulationPaiementRapprochementDto(initial.getId(), op, new BigDecimal("100.00"), initial.getLibelleRapprochement());
+        doThrow(new IllegalStateException("Réponse perdue après annulation")).doNothing()
+                .when(factures).annulerPaiement(c, TypeFactureRapprochement.SALAIRE, 31L, demande);
+        assertThatThrownBy(() -> service.annulerRapprochementValide(c, initial.getId())).hasMessageContaining("perdue");
+        assertThat(rapprochements.findById(initial.getId()).orElseThrow().getStatut()).isEqualTo(StatutRapprochement.VALIDE);
+        assertThat(operations.findById(op).orElseThrow().getMontantRapproche()).isEqualByComparingTo("100");
+        assertThat(service.annulerRapprochementValide(c, initial.getId()).statut()).isEqualTo(StatutRapprochement.ANNULE);
+        service.annulerRapprochementValide(c, initial.getId());
+        verify(factures, times(2)).annulerPaiement(c, TypeFactureRapprochement.SALAIRE, 31L, demande);
+        var operation = operations.findById(op).orElseThrow();
+        assertThat(operation.getMontantRapproche()).isZero();
+        assertThat(operation.getStatutRapprochement()).isEqualTo(StatutOperationBancaire.NON_RAPPROCHEE);
+        assertThat(operation.getTiersId()).isEqualTo(7L);
+        assertThat(operation.getSalaireId()).isNull();
+        assertThat(service.listerFacturesCandidates(c, op)).filteredOn(f -> "SALAIRE".equals(f.typeFacture()))
+                .containsExactly(janvier, novembre);
+        service.rapprocherManuellement(c, op, new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(32L, TypeFactureRapprochement.SALAIRE, new BigDecimal("100.00")))));
+        assertThat(operations.findById(op).orElseThrow().getSalaireId()).isEqualTo(32L);
+        assertThat(rapprochements.findById(initial.getId()).orElseThrow().getUtilisateurAnnulationId()).isEqualTo(c.utilisateurId());
+    }
+
+    @Test void annulationUnitaireConserveAutreAssociationEtRefusePaiementIncertain() {
+        tiersAssistant(7L, "Fournisseur fictif", "FOURNISSEUR_GENERAL", false, null);
+        service.rapprocherManuellement(c, op, new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(10L, TypeFactureRapprochement.ACHAT, new BigDecimal("60.00")),
+                new LigneRapprochementManuelDemande(11L, TypeFactureRapprochement.ACHAT, new BigDecimal("40.00")))));
+        var initial = rapprochements.findByOperationBancaireIdAndStatut(op, StatutRapprochement.VALIDE).stream()
+                .filter(r -> r.getFactureId().equals(11L)).findFirst().orElseThrow();
+        var demande = new AnnulationPaiementRapprochementDto(initial.getId(), op, new BigDecimal("40.00"), initial.getLibelleRapprochement());
+        doThrow(new fr.wavy.tresorerie.exception.RegleMetierException("PAIEMENT_ORIGINE_NON_IDENTIFIE", "Paiement sans reçu certain"))
+                .doNothing().when(factures).annulerPaiement(c, TypeFactureRapprochement.ACHAT, 11L, demande);
+        assertThatThrownBy(() -> service.annulerRapprochementValide(c, initial.getId())).hasMessageContaining("sans reçu certain");
+        assertThat(rapprochements.findById(initial.getId()).orElseThrow().getStatut()).isEqualTo(StatutRapprochement.VALIDE);
+        service.annulerRapprochementsProposes(c);
+        verify(factures, times(1)).annulerPaiement(c, TypeFactureRapprochement.ACHAT, 11L, demande);
+        assertThat(rapprochements.findByOperationBancaireIdAndStatut(op, StatutRapprochement.VALIDE)).hasSize(2);
+
+        service.annulerRapprochementValide(c, initial.getId());
+        var operation = operations.findById(op).orElseThrow();
+        assertThat(operation.getMontantRapproche()).isEqualByComparingTo("60");
+        assertThat(operation.getStatutRapprochement()).isEqualTo(StatutOperationBancaire.PARTIELLEMENT_RAPPROCHEE);
+        assertThat(operation.getFactureId()).isEqualTo(10L);
+    }
+
+    @Test void annulationCarteLibereSaReservationSansEffacerLeLienHistorique() {
+        carteSure();
+        Long rapprochement = paiements.confirmerCarte(c, op, confirmation(true, false));
+        service.annulerRapprochementValide(c, rapprochement);
+        var trace = rapprochements.findById(rapprochement).orElseThrow();
+        assertThat(trace.getStatut()).isEqualTo(StatutRapprochement.ANNULE);
+        assertThat(trace.getFactureId()).isEqualTo(10L);
+        assertThat(paiements.confirmerCarte(c, op, confirmation(false, false))).isNotEqualTo(rapprochement);
+    }
+
     @Test void endpointGeneriqueNeContournePasLesCandidatsNiLePlafond() {
         assertThatThrownBy(()->service.creerRapprochement(c,new RapprochementBancaireDemande(op,999L,TypeFactureRapprochement.ACHAT,new BigDecimal("10.00"),null,StatutRapprochement.VALIDE,null))).hasMessageContaining("validée");
         assertThatThrownBy(()->service.creerRapprochement(c,new RapprochementBancaireDemande(op,10L,TypeFactureRapprochement.ACHAT,new BigDecimal("100.01"),null,StatutRapprochement.VALIDE,null))).hasMessageContaining("disponible");

@@ -25,6 +25,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import fr.wavy.tresorerie.dto.ConfirmationCarteDemande;
+import fr.wavy.tresorerie.dto.AnnulationPaiementRapprochementDto;
 import fr.wavy.tresorerie.dto.AssistantRapprochementDto.*;
 import fr.wavy.tresorerie.dto.ConfirmationCartesDemande;
 import fr.wavy.tresorerie.dto.ConfirmationCartesResultat;
@@ -98,6 +99,7 @@ import fr.wavy.tresorerie.service.importreleve.LigneReleveBancaire;
 public class TresorerieService {
     private static final int TAILLE_PAGE_OPERATIONS_DEFAUT = 25;
     private static final int TAILLE_PAGE_OPERATIONS_MAX = 200;
+    private static final String MOTIF_ANNULATION_VALIDE = "Annulation du rapprochement validé";
     private static final BigDecimal TOLERANCE_MONTANT = new BigDecimal("0.01");
     private static final DateTimeFormatter DATE_RAPPROCHEMENT_FORMAT = DateTimeFormatter.BASIC_ISO_DATE;
     private static final Map<String, String> CHAMPS_TRI_OPERATIONS = Map.ofEntries(
@@ -1462,6 +1464,56 @@ public class TresorerieService {
     public RapprochementBancaireReponse annulerRapprochementPropose(ContexteRequete contexte, Long id) {
         RapprochementBancaire rapprochement = trouverRapprochement(contexte, id);
         annulerProposition(contexte, rapprochement, null);
+        return mapper.versReponse(rapprochement);
+    }
+
+    public RapprochementBancaireReponse annulerRapprochementValide(ContexteRequete contexte, Long id) {
+        var rapprochement = trouverRapprochement(contexte, id);
+        var operation = trouverOperation(contexte, rapprochement.getOperationBancaire().getId());
+        entityManager.refresh(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+        entityManager.refresh(rapprochement);
+        if (rapprochement.getStatut() == StatutRapprochement.ANNULE && MOTIF_ANNULATION_VALIDE.equals(rapprochement.getMotifAnnulation()))
+            return mapper.versReponse(rapprochement);
+        if (rapprochement.getStatut() != StatutRapprochement.VALIDE)
+            throw new RegleMetierException("RAPPROCHEMENT_STATUT_INVALIDE", "Seul un rapprochement validé peut être annulé par cette action.");
+
+        var type = rapprochement.getTypeFacture();
+        Long pieceId = type == TypeFactureRapprochement.SALAIRE ? rapprochement.getSalaireId() : rapprochement.getFactureId();
+        String reference = rapprochement.getLibelleRapprochement();
+        if (type == null || pieceId == null
+                || rapprochement.getPieceRapprochementId() != null
+                || (type == TypeFactureRapprochement.ACHAT && pieceId.equals(operation.getFactureRapprochementId()))
+                || reference == null || reference.isBlank()) {
+            throw new RegleMetierException("PAIEMENT_ORIGINE_NON_IDENTIFIE", "Le paiement d’origine n’a pas pu être identifié avec certitude.");
+        }
+
+        // Le lien garde sa réservation tant que Factures n'a pas confirmé. Une reprise
+        // après interruption renvoie exactement le même reçu, déjà annulé le cas échéant.
+        facturesClient.annulerPaiement(contexte, type, pieceId, new AnnulationPaiementRapprochementDto(
+                id, operation.getId(), rapprochement.getMontantRapproche(), reference));
+
+        var maintenant = LocalDateTime.now();
+        rapprochement.setStatut(StatutRapprochement.ANNULE);
+        rapprochement.setDateAnnulation(maintenant);
+        rapprochement.setUtilisateurAnnulationId(contexte.utilisateurId());
+        rapprochement.setMotifAnnulation(MOTIF_ANNULATION_VALIDE);
+        entityManager.flush();
+        var restants = rapprochementRepository.findByOperationBancaireIdAndStatut(operation.getId(), StatutRapprochement.VALIDE);
+        BigDecimal total = restants.stream().map(RapprochementBancaire::getMontantRapproche).reduce(BigDecimal.ZERO, BigDecimal::add);
+        var dernier = restants.stream().max(Comparator
+                .comparing((RapprochementBancaire r) -> r.getDateValidation() == null ? r.getDateRapprochement() : r.getDateValidation())
+                .thenComparing(RapprochementBancaire::getId)).orElse(null);
+        boolean complet = total.signum() > 0 && total.compareTo(montantOperation(operation)) >= 0;
+        operation.setRapprochee(complet);
+        operation.setStatutRapprochement(complet ? StatutOperationBancaire.RAPPROCHEE
+                : total.signum() > 0 ? StatutOperationBancaire.PARTIELLEMENT_RAPPROCHEE : StatutOperationBancaire.NON_RAPPROCHEE);
+        operation.setFactureId(dernier == null ? null : dernier.getFactureId());
+        operation.setSalaireId(dernier == null ? null : dernier.getSalaireId());
+        operation.setTypeFacture(dernier == null ? null : dernier.getTypeFacture());
+        operation.setLibelleRapprochement(dernier == null ? null : dernier.getLibelleRapprochement());
+        operation.setDateRapprochement(dernier == null ? null
+                : dernier.getDateValidation() == null ? dernier.getDateRapprochement() : dernier.getDateValidation());
+        operation.setDateModification(maintenant);
         return mapper.versReponse(rapprochement);
     }
 

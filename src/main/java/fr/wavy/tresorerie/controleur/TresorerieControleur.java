@@ -336,6 +336,11 @@ public class TresorerieControleur {
         return tresorerieService.annulerRapprochementPropose(contexte(request), id);
     }
 
+    @PostMapping("/rapprochements-bancaires/{id}/annuler-valide")
+    public RapprochementBancaireReponse annulerRapprochementValide(HttpServletRequest request, @PathVariable Long id) {
+        return tresorerieService.annulerRapprochementValide(contexte(request), id);
+    }
+
     @PostMapping({"/rapprochements-bancaires/valider-proposes", "/rapprochements/valider-proposes"})
     public RapprochementPropositionsResultat validerRapprochementsProposes(HttpServletRequest request) {
         return tresorerieService.validerRapprochementsProposes(contexte(request));

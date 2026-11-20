@@ -1,6 +1,7 @@
 package fr.wavy.tresorerie.client;
 
 import java.util.List;
+import fr.wavy.tresorerie.dto.AnnulationPaiementRapprochementDto;
 import java.math.BigDecimal;
 
 import fr.wavy.tresorerie.dto.PieceCarteRapprochementDto;
@@ -31,4 +32,6 @@ public interface FacturesTresorerieClient {
             ContexteRequete contexte, Long tiersId, int annee, int mois, BigDecimal montant);
     List<FactureOuverteRapprochementDto> listerFacturesAchatNotesFraisOuvertes(ContexteRequete contexte, Long tiersId, BigDecimal montant);
     FactureOuverteRapprochementDto enregistrerPaiement(ContexteRequete contexte, TypeFactureRapprochement typeFacture, Long factureId, EnregistrementPaiementFactureDto demande);
+    void annulerPaiement(ContexteRequete contexte, TypeFactureRapprochement typeFacture, Long pieceId,
+            AnnulationPaiementRapprochementDto demande);
 }

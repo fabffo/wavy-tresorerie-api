@@ -16,6 +16,7 @@ import fr.wavy.tresorerie.configuration.AuthentificationSortante;
 import fr.wavy.tresorerie.dto.BalanceAgeeReponse;
 import fr.wavy.tresorerie.dto.CreationFactureAchatDepuisOperationBancaireDemande;
 import fr.wavy.tresorerie.dto.EnregistrementPaiementFactureDto;
+import fr.wavy.tresorerie.dto.AnnulationPaiementRapprochementDto;
 import fr.wavy.tresorerie.dto.FactureAchatRapprochementReponse;
 import fr.wavy.tresorerie.dto.FactureEcheanceReponse;
 import fr.wavy.tresorerie.dto.PageEcheancesReponse;
@@ -30,11 +31,16 @@ import fr.wavy.tresorerie.exception.ErreurInterserviceException;
 public class HttpFacturesTresorerieClient implements FacturesTresorerieClient {
 
     private final RestClient restClient;
+    private final RestClient clientAnnulation;
     private final AuthentificationSortante authentificationSortante;
 
     public HttpFacturesTresorerieClient(@Value("${wavy.factures.api-url}") String facturesApiUrl,
             AuthentificationSortante authentificationSortante) {
         this.restClient = RestClient.builder().baseUrl(facturesApiUrl).build();
+        var requetesAnnulation = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        requetesAnnulation.setConnectTimeout(java.time.Duration.ofSeconds(5));
+        requetesAnnulation.setReadTimeout(java.time.Duration.ofSeconds(20));
+        this.clientAnnulation = restClient.mutate().requestFactory(requetesAnnulation).build();
         this.authentificationSortante = authentificationSortante;
     }
 
@@ -179,6 +185,39 @@ public class HttpFacturesTresorerieClient implements FacturesTresorerieClient {
                 .body(demande)
                 .retrieve()
                 .body(FactureOuverteRapprochementDto.class));
+    }
+
+    @Override
+    public void annulerPaiement(ContexteRequete contexte, TypeFactureRapprochement typeFacture, Long pieceId,
+            AnnulationPaiementRapprochementDto demande) {
+        try {
+            var reponse = clientAnnulation.post()
+                    .uri("/interne/factures/rapprochement/{typeFacture}/{id}/annuler-paiement", typeFacture.name(), pieceId)
+                    .headers(headers -> appliquerContexte(headers, contexte))
+                    .body(demande)
+                    .retrieve()
+                    .toBodilessEntity();
+            if (reponse.getStatusCode().value() != 204) throw annulationNonConfirmee(null);
+        } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().value() == 400) {
+                fr.wavy.tresorerie.exception.ApiErreur refus = null;
+                try {
+                    refus = exception.getResponseBodyAs(fr.wavy.tresorerie.exception.ApiErreur.class);
+                } catch (RestClientException | IllegalStateException corpsInattendu) {
+                    // Une réponse illisible ne constitue pas une confirmation d'annulation.
+                }
+                if (refus != null && ("PAIEMENT_ORIGINE_NON_IDENTIFIE".equals(refus.code()) || "SOLDE_PIECE_INCOHERENT".equals(refus.code())))
+                    throw new fr.wavy.tresorerie.exception.RegleMetierException(refus.code(), refus.message());
+            }
+            throw annulationNonConfirmee(exception);
+        } catch (RestClientException exception) {
+            throw annulationNonConfirmee(exception);
+        }
+    }
+
+    private ErreurInterserviceException annulationNonConfirmee(Throwable cause) {
+        return new ErreurInterserviceException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                "Annulation Factures non confirmée. Réessayez sur le même rapprochement.", cause);
     }
 
     private void appliquerContexte(HttpHeaders headers, ContexteRequete contexte) {

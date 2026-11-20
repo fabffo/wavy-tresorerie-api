@@ -15,6 +15,7 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -124,6 +125,36 @@ class PropagationAuthentificationClientsTest {
         client.enregistrerPaiement(contexte(), fr.wavy.tresorerie.modele.TypeFactureRapprochement.ACHAT, 9L,
                 new fr.wavy.tresorerie.dto.EnregistrementPaiementFactureDto(new java.math.BigDecimal("12.00"), java.time.LocalDate.of(2026,2,1), "RAP-42", 11L, 42L, 7L, true));
         assertThat(corps.get()).contains("\"operationBancaireId\":11", "\"rapprochementId\":42", "\"tiersId\":7", "\"remboursementBeneficiaire\":true");
+    }
+
+    @Test
+    void annulationExigeUneConfirmationSurLaRouteInterne() throws Exception {
+        var chemin = new AtomicReference<String>();
+        var entetes = new AtomicReference<Headers>();
+        var status = new java.util.concurrent.atomic.AtomicInteger(204);
+        String baseUrl = demarrer(exchange -> {
+            chemin.set(exchange.getRequestURI().getPath());
+            entetes.set(exchange.getRequestHeaders());
+            exchange.getRequestBody().readAllBytes();
+            if (status.get() == 204) {
+                exchange.sendResponseHeaders(204, -1);
+                exchange.close();
+            } else repondre(exchange, status.get(),
+                    "{\"code\":\"PAIEMENT_ORIGINE_NON_IDENTIFIE\",\"message\":\"Reçu introuvable\"}");
+        });
+        preparerRequeteEntrante();
+        var client = new HttpFacturesTresorerieClient(baseUrl, new AuthentificationSortante());
+        var type = fr.wavy.tresorerie.modele.TypeFactureRapprochement.SALAIRE;
+        var demande = new fr.wavy.tresorerie.dto.AnnulationPaiementRapprochementDto(42L, 11L,
+                new java.math.BigDecimal("12.00"), "RAP-42");
+        client.annulerPaiement(contexte(), type, 9L, demande);
+        assertThat(chemin.get()).isEqualTo("/interne/factures/rapprochement/SALAIRE/9/annuler-paiement");
+        verifierEntetes(entetes.get());
+        status.set(200);
+        assertThatThrownBy(() -> client.annulerPaiement(contexte(), type, 9L, demande))
+                .isInstanceOf(ErreurInterserviceException.class);
+        status.set(400);
+        assertThatThrownBy(() -> client.annulerPaiement(contexte(), type, 9L, demande)).hasMessageContaining("Reçu introuvable");
     }
 
     private String demarrer(Gestionnaire gestionnaire) throws IOException {
