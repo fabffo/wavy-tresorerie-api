@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 import fr.wavy.tresorerie.dto.CompteBancaireDto;
 import fr.wavy.tresorerie.dto.ImportReleveReponse;
 import fr.wavy.tresorerie.dto.OperationBancaireReponse;
+import fr.wavy.tresorerie.dto.RoleTiersConsultation;
 import fr.wavy.tresorerie.dto.RapprochementBancaireReponse;
 import fr.wavy.tresorerie.dto.RegleRapprochementReponse;
 import fr.wavy.tresorerie.modele.CompteBancaire;
@@ -81,7 +82,8 @@ public class TresorerieMapper {
                 operation.getMontantRapproche(),
                 operation.getNumeroPieceAssociee(),
                 operation.getPieceRapprochementId(),
-                rolesTiers
+                rolesTiers,
+                RoleTiersConsultation.libelles(rolesTiers)
         );
     }
 

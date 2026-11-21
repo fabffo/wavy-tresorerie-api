@@ -14,13 +14,24 @@ public final class AssistantRapprochementDto {
     public record Perimetre(String tiersReconnu, TypeTiersReconnu typeTiersReconnu,
             NatureOperationBancaire natureOperation, StatutClassificationOperation statutClassification,
             StatutOperationBancaire statutRapprochement, @Size(max=1000) List<@Positive Long> operationIds,
-            Long importId, String statutConsultation, Boolean consultation) {
+            Long importId, String statutConsultation, Boolean consultation, @Size(max=100) List<String> rolesTiers) {
+        public Perimetre(String tiersReconnu, TypeTiersReconnu typeTiersReconnu, NatureOperationBancaire natureOperation,
+                StatutClassificationOperation statutClassification, StatutOperationBancaire statutRapprochement, List<Long> operationIds,
+                Long importId, String statutConsultation, Boolean consultation) {
+            this(tiersReconnu, typeTiersReconnu, natureOperation, statutClassification, statutRapprochement,
+                    operationIds, importId, statutConsultation, consultation, null);
+        }
         public Perimetre(String tiersReconnu, TypeTiersReconnu typeTiersReconnu, NatureOperationBancaire natureOperation,
                 StatutClassificationOperation statutClassification, StatutOperationBancaire statutRapprochement, List<Long> operationIds) {
             this(tiersReconnu, typeTiersReconnu, natureOperation, statutClassification, statutRapprochement, operationIds, null, null, null);
         }
     }
-    public record Compteurs(long total, long rapprochees, long partielles, long tiersIdentifies, long nonRapprochees, long sansTiers) {}
+    public record Compteurs(long total, long rapprochees, long partielles, long tiersIdentifies, long nonRapprochees, long sansTiers,
+            List<RoleTiersConsultation> rolesTiersDisponibles) {
+        public Compteurs(long total, long rapprochees, long partielles, long tiersIdentifies, long nonRapprochees, long sansTiers) {
+            this(total, rapprochees, partielles, tiersIdentifies, nonRapprochees, sansTiers, List.of());
+        }
+    }
     public record Detail(OperationBancaireReponse operation, List<RapprochementBancaireReponse> historique, BigDecimal solde) {}
     public record Candidat(String cle, Long tiersId, String nomTiers, TypeTiersReconnu typeTiers,
             Long pieceId, String numeroPiece, String typePiece, BigDecimal montantDisponible,

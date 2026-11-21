@@ -53,6 +53,7 @@ import fr.wavy.tresorerie.dto.ImportReleveReponse;
 import fr.wavy.tresorerie.dto.MiseAJourLibelleRapprochementDemande;
 import fr.wavy.tresorerie.dto.OperationBancaireDemande;
 import fr.wavy.tresorerie.dto.OperationBancaireReponse;
+import fr.wavy.tresorerie.dto.RoleTiersConsultation;
 import fr.wavy.tresorerie.dto.PieceRapprochementReponse;
 import fr.wavy.tresorerie.dto.RapprochementBancaireDemande;
 import fr.wavy.tresorerie.dto.RapprochementBancaireReponse;
@@ -247,16 +248,19 @@ public class TresorerieService {
             Integer page,
             Integer size,
             String sortBy,
-            String sortDirection
+            String sortDirection,
+            List<String> rolesTiers
     ) {
-        Pageable pageable = pageableOperations(page, size, sortBy, sortDirection);
-        var tiersParId = tiersClient.listerTiersActifs(contexte).stream()
+        var tiers = tiersClient.listerTiersActifs(contexte);
+        var tiersParId = tiers.stream()
                 .collect(Collectors.groupingBy(TiersTresorerieDto::id));
+        Pageable pageable = pageableOperations(page, size, sortBy, sortDirection, tiersParId);
         return operationRepository.rechercher(
                         contexte.tenantId(), contexte.societeCouranteId(), compteBancaireId, dateDebut, dateFin,
                         libelle == null ? "" : libelle.trim(), montantMin, montantMax, sens, typeOperation,
                         tiersReconnu == null ? "" : tiersReconnu.trim(), typeTiersReconnu, natureOperation, statutClassification,
-                        statutRapprochement, importId, statutConsultation, false, List.of(0L), pageable)
+                        statutRapprochement, importId, statutConsultation, false, List.of(0L),
+                        filtreRolesActif(rolesTiers), tiersCorrespondantAuxRoles(rolesTiers, tiers), pageable)
                 .map(operation -> reponseOperationListe(operation, tiersParId));
     }
 
@@ -264,19 +268,45 @@ public class TresorerieService {
         if (operation.getTiersId() == null) return mapper.versReponse(operation);
         var fiches = tiersParId.getOrDefault(operation.getTiersId(), List.of());
         boolean pieceAutorisee = fiches.stream().anyMatch(tiers -> Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()));
-        var roles = fiches.stream()
+        return mapper.versReponse(operation, pieceAutorisee, rolesActifs(fiches));
+    }
+
+    private List<String> rolesActifs(List<TiersTresorerieDto> fiches) {
+        return fiches.stream()
                 .filter(tiers -> !Boolean.FALSE.equals(tiers.actif()) && tiers.roles() != null)
                 .flatMap(tiers -> tiers.roles().stream())
+                .filter(role -> role != null && !role.isBlank())
                 .distinct().sorted().toList();
-        return mapper.versReponse(operation, pieceAutorisee, roles);
+    }
+
+    private boolean filtreRolesActif(List<String> roles) {
+        return roles != null && !roles.isEmpty();
+    }
+
+    private List<Long> tiersCorrespondantAuxRoles(List<String> roles, List<TiersTresorerieDto> tiers) {
+        if (filtreRolesActif(roles)) {
+            var ids = tiers.stream().filter(t -> !Boolean.FALSE.equals(t.actif()) && t.roles() != null
+                    && roles.stream().anyMatch(t.roles()::contains)).map(TiersTresorerieDto::id).distinct().toList();
+            if (!ids.isEmpty()) return ids;
+        }
+        return List.of(0L);
     }
 
     @Transactional(readOnly = true)
     public Compteurs compterOperations(ContexteRequete c, Perimetre p) {
+        var tiers = tiersClient.listerTiersActifs(c);
+        var rolesDisponibles = rolesActifs(tiers).stream().map(RoleTiersConsultation::depuisCode)
+                .sorted(Comparator.comparing(RoleTiersConsultation::libelle, RoleTiersConsultation.triLibelles())).toList();
+        return compterOperations(c, p, tiers, rolesDisponibles);
+    }
+
+    private Compteurs compterOperations(ContexteRequete c, Perimetre p, List<TiersTresorerieDto> tiers,
+            List<RoleTiersConsultation> rolesDisponibles) {
         if (p == null) p = new Perimetre(null, null, null, null, null, null);
         var resultats = operationRepository.compter(c.tenantId(), c.societeCouranteId(), null, null, null, "", null, null,
                 null, null, p.tiersReconnu() == null ? "" : p.tiersReconnu().trim(), p.typeTiersReconnu(),
-                p.natureOperation(), p.statutClassification(), p.statutRapprochement(), p.importId(), p.statutConsultation());
+                p.natureOperation(), p.statutClassification(), p.statutRapprochement(), p.importId(), p.statutConsultation(),
+                filtreRolesActif(p.rolesTiers()), tiersCorrespondantAuxRoles(p.rolesTiers(), tiers));
         Map<String, Long> comptes = new HashMap<>();
         long sansTiers = 0;
         for (var resultat : resultats) {
@@ -285,7 +315,7 @@ public class TresorerieService {
         }
         return new Compteurs(comptes.values().stream().mapToLong(Long::longValue).sum(),
                 comptes.getOrDefault("RAPPROCHEE", 0L), comptes.getOrDefault("PARTIELLE", 0L),
-                comptes.getOrDefault("TIERS_IDENTIFIE", 0L), comptes.getOrDefault("NON_RAPPROCHEE", 0L), sansTiers);
+                comptes.getOrDefault("TIERS_IDENTIFIE", 0L), comptes.getOrDefault("NON_RAPPROCHEE", 0L), sansTiers, rolesDisponibles);
     }
 
     @Transactional(readOnly = true)
@@ -297,7 +327,8 @@ public class TresorerieService {
                 montantOperation(operation).subtract(nulZero(operation.getMontantRapproche())));
     }
 
-    private Pageable pageableOperations(Integer page, Integer size, String sortBy, String sortDirection) {
+    private Pageable pageableOperations(Integer page, Integer size, String sortBy, String sortDirection,
+            Map<Long, List<TiersTresorerieDto>> tiersParId) {
         int numeroPage = Math.max(0, page == null ? 0 : page);
         int taillePage = size == null ? TAILLE_PAGE_OPERATIONS_DEFAUT : size;
         taillePage = Math.max(1, Math.min(taillePage, TAILLE_PAGE_OPERATIONS_MAX));
@@ -305,6 +336,7 @@ public class TresorerieService {
         String proprieteTri = CHAMPS_TRI_OPERATIONS.getOrDefault(sortBy, "dateOperation");
         Sort.Direction direction = "ASC".equalsIgnoreCase(sortDirection) ? Sort.Direction.ASC : Sort.Direction.DESC;
         Sort tri = switch (sortBy) {
+            case "rolesTiers" -> triRolesTiers(tiersParId, direction);
             case "statutConsultation" -> org.springframework.data.jpa.domain.JpaSort.unsafe(direction, "(" + OperationBancaireRepository.STATUT_CONSULTATION + ")");
             case "montantSigne" -> org.springframework.data.jpa.domain.JpaSort.unsafe(direction,
                     "(case when o.sens = fr.wavy.tresorerie.modele.SensOperation.DEBIT then -abs(o.debit) else abs(o.montant) end)");
@@ -313,6 +345,25 @@ public class TresorerieService {
         };
         tri = tri.and(Sort.by(Sort.Direction.DESC, "id"));
         return PageRequest.of(numeroPage, taillePage, tri);
+    }
+
+    private Sort triRolesTiers(Map<Long, List<TiersTresorerieDto>> tiersParId, Sort.Direction direction) {
+        var parLibelle = new java.util.TreeMap<String, List<Long>>(RoleTiersConsultation.triLibelles());
+        tiersParId.forEach((id, fiches) -> {
+            String libelles = RoleTiersConsultation.libelles(rolesActifs(fiches));
+            if (!libelles.isEmpty()) parLibelle.computeIfAbsent(libelles, cle -> new ArrayList<>()).add(id);
+        });
+        if (parLibelle.isEmpty()) return Sort.unsorted();
+        // Le CASE contient uniquement des identifiants numériques issus du référentiel Tiers et des rangs.
+        var expression = new StringBuilder("(case ");
+        int rang = 0;
+        for (var groupe : parLibelle.values()) {
+            expression.append("when o.tiersId in (")
+                    .append(groupe.stream().sorted().map(String::valueOf).collect(Collectors.joining(",")))
+                    .append(") then ").append(rang++).append(' ');
+        }
+        expression.append("else ").append(direction.isAscending() ? rang : -1).append(" end)");
+        return org.springframework.data.jpa.domain.JpaSort.unsafe(direction, expression.toString());
     }
 
     @Transactional(readOnly = true)
@@ -460,12 +511,13 @@ public class TresorerieService {
         return paiementsAchats.confirmerCartes(contexte, demande);
     }
 
-    private List<OperationBancaire> operationsAssistant(ContexteRequete c, Perimetre p) {
+    private List<OperationBancaire> operationsAssistant(ContexteRequete c, Perimetre p, List<TiersTresorerieDto> tiers) {
         if (p==null) p=new Perimetre(null,null,null,null,null,null);
         var page=operationRepository.rechercher(c.tenantId(),c.societeCouranteId(),null,null,null,"",null,null,null,null,
                 p.tiersReconnu()==null ? "" : p.tiersReconnu().trim(),p.typeTiersReconnu(),p.natureOperation(),p.statutClassification(),
                 p.statutRapprochement(), p.importId(), p.statutConsultation(), p.operationIds() != null,
                 p.operationIds() == null || p.operationIds().isEmpty() ? List.of(0L) : p.operationIds(),
+                filtreRolesActif(p.rolesTiers()), tiersCorrespondantAuxRoles(p.rolesTiers(), tiers),
                 Pageable.unpaged(Sort.by("id")));
         return page.getContent();
     }
@@ -523,17 +575,16 @@ public class TresorerieService {
     /** Lecture seule : ni rapprochement PROPOSE ni tiers/règle ne sont écrits ici. */
     @Transactional(readOnly=true)
     public Apercu previsualiserAssistant(ContexteRequete c,Etape e,String categorie,Perimetre p) {
-        return previsualiserAssistant(c, e, categorie, p, true);
+        return previsualiserAssistant(c, e, categorie, p, true, tiersAssistant(c));
     }
 
-    private Apercu previsualiserAssistant(ContexteRequete c, Etape e, String categorie, Perimetre p, boolean verifierTiers) {
+    private Apercu previsualiserAssistant(ContexteRequete c, Etape e, String categorie, Perimetre p, boolean verifierTiers, List<TiersTresorerieDto> tiers) {
         if (e==null) throw new RegleMetierException("ETAPE_REQUISE","Choisissez une étape.");
         if (e==Etape.NOTES_FRAIS && categorie!=null && !List.of("CARTE","REMBOURSEMENT").contains(categorie))
             throw new RegleMetierException("CATEGORIE_INVALIDE","Choisissez carte ou remboursement.");
-        if (verifierTiers) verifierTiersIdentifies(c, e, p);
-        var scope=operationsAssistant(c,p);
+        if (verifierTiers) verifierTiersIdentifies(c, e, p, tiers);
+        var scope=operationsAssistant(c,p,tiers);
         boolean consultation = p != null && Boolean.TRUE.equals(p.consultation());
-        var tiers=tiersClient.listerTiersActifs(c).stream().filter(t -> !Boolean.FALSE.equals(t.actif())).toList();
         Map<Long,TiersTresorerieDto> parTiers=tiers.stream().collect(Collectors.toMap(TiersTresorerieDto::id,Function.identity(),(a,b)->a));
         var regles=e==Etape.TIERS ? classificationService.chargerReglesBancaires(c,tiers) : List.<RegleClassificationOperation>of();
         var cartes=e==Etape.TIERS ? List.<PieceCarteRapprochementDto>of() : facturesClient.listerCartesOuvertes(c);
@@ -772,9 +823,13 @@ public class TresorerieService {
         });
     }
 
-    private void verifierTiersIdentifies(ContexteRequete c, Etape e, Perimetre p) {
+    private List<TiersTresorerieDto> tiersAssistant(ContexteRequete c) {
+        return tiersClient.listerTiersActifs(c).stream().filter(t -> !Boolean.FALSE.equals(t.actif())).toList();
+    }
+
+    private void verifierTiersIdentifies(ContexteRequete c, Etape e, Perimetre p, List<TiersTresorerieDto> tiers) {
         if (e != Etape.SALAIRES && e != Etape.CLIENTS && e != Etape.FOURNISSEURS) return;
-        long sansTiers = compterOperations(c, p).sansTiers();
+        long sansTiers = compterOperations(c, p, tiers, List.of()).sansTiers();
         if (sansTiers > 0) throw new RegleMetierException("TIERS_A_IDENTIFIER",
                 sansTiers + " opérations restent à identifier. Terminez l’identification des tiers avant de lancer les rapprochements.");
     }
@@ -788,12 +843,15 @@ public class TresorerieService {
         if ((demande.perimetre()==null || !Boolean.TRUE.equals(demande.perimetre().consultation()))
                 && (demande.etape()==Etape.CLIENTS || demande.etape()==Etape.SALAIRES) && nombreOperations>1)
             throw new RegleMetierException("CONFIRMATION_INDIVIDUELLE","Ce parcours conserve une confirmation par opération.");
-        verifierTiersIdentifies(c, demande.etape(), demande.perimetre());
-        var operations=operationsAssistant(c,demande.perimetre()).stream().map(OperationBancaire::getId).collect(Collectors.toSet());
+        var tiers = tiersAssistant(c);
+        var rolesSelectionnes = demande.perimetre() == null ? null : demande.perimetre().rolesTiers();
+        var tiersFiltres = new java.util.HashSet<>(tiersCorrespondantAuxRoles(rolesSelectionnes, tiers));
+        verifierTiersIdentifies(c, demande.etape(), demande.perimetre(), tiers);
+        var operations=operationsAssistant(c,demande.perimetre(),tiers).stream().map(OperationBancaire::getId).collect(Collectors.toSet());
         Map<Long, Set<String>> certainesDuPerimetre = null;
         if (nombreOperations>1 && demande.etape()!=Etape.TIERS && demande.perimetre()!=null
                 && Boolean.TRUE.equals(demande.perimetre().consultation())) {
-            certainesDuPerimetre = previsualiserAssistant(c, demande.etape(), demande.categorie(), demande.perimetre(), false)
+            certainesDuPerimetre = previsualiserAssistant(c, demande.etape(), demande.categorie(), demande.perimetre(), false, tiers)
                     .lignes().stream().filter(l -> !l.bloquee()).collect(Collectors.toMap(l -> l.operation().id(),
                             l -> l.candidats().stream().filter(Candidat::sur).map(Candidat::cle).collect(Collectors.toSet())));
         }
@@ -803,6 +861,7 @@ public class TresorerieService {
             try {
                 if (!operations.contains(choix.operationId())) {
                     var deja=rapprochementRepository.findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(c.tenantId(),c.societeCouranteId()).stream()
+                        .filter(r -> !filtreRolesActif(rolesSelectionnes) || tiersFiltres.contains(r.getOperationBancaire().getTiersId()))
                         .filter(r -> r.getOperationBancaire().getId().equals(choix.operationId()) && r.getStatut()==StatutRapprochement.VALIDE && traceCorrespondAuChoix(r, demande.etape(), choix)
                             && java.util.Objects.equals(r.getOperationBancaire().getTiersId(),choix.tiersId()) && r.getMontantRapproche().compareTo(choix.montant())==0
                             && (demande.etape()==Etape.PIECES || "CREATION".equals(choix.candidatCle()) || java.util.Objects.equals(choix.pieceId(),r.getTypeFacture()==TypeFactureRapprochement.SALAIRE ? r.getSalaireId() : r.getFactureId())))
@@ -822,10 +881,11 @@ public class TresorerieService {
                         && ((demande.perimetre()==null || !Boolean.TRUE.equals(demande.perimetre().consultation()))
                             || famillePiece(choix.candidatCle()).equals(famillePiece(a.candidatCle())))))
                     throw new RegleMetierException("CONFLIT_PIECE","Une pièce est sélectionnée sur plusieurs opérations : traiter individuellement.");
-                Long id=confirmerChoixAssistant(c,demande,choix,nombreOperations>1,certainesDuPerimetre);
+                Long id=confirmerChoixAssistant(c,demande,choix,nombreOperations>1,certainesDuPerimetre,tiers);
                 resultat.add(new Resultat(choix.operationId(),"SUCCES",null,"Traitement confirmé.",id));
             } catch (RegleMetierException ex) {
-                journaliserAnomalieAssistant(c,choix.operationId(),ex.getCode());
+                if (!"HORS_PERIMETRE".equals(ex.getCode()) || !filtreRolesActif(rolesSelectionnes))
+                    journaliserAnomalieAssistant(c,choix.operationId(),ex.getCode());
                 boolean conflit=ex.getCode().contains("CONFLIT") || ex.getCode().contains("DOUBLON") || ex.getCode().contains("AMBIG");
                 resultat.add(new Resultat(choix.operationId(),conflit ? "CONFLIT" : "REFUSE",ex.getCode(),ex.getMessage(),null));
             } catch (RuntimeException ex) {
@@ -837,7 +897,7 @@ public class TresorerieService {
             (int)resultat.stream().filter(r -> r.statut().equals("CONFLIT")).count(),(int)resultat.stream().filter(r -> r.statut().equals("A_REPRENDRE")).count(),List.copyOf(resultat));
     }
 
-    private Long confirmerChoixAssistant(ContexteRequete c,Confirmation demande,Choix choix,boolean groupe, Map<Long, Set<String>> certainesDuPerimetre) {
+    private Long confirmerChoixAssistant(ContexteRequete c,Confirmation demande,Choix choix,boolean groupe, Map<Long, Set<String>> certainesDuPerimetre, List<TiersTresorerieDto> tiers) {
         // Une reprise garde les références et montants d'origine, même si la pièce a été soldée à distance.
         var traces=rapprochementRepository.findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(c.tenantId(),c.societeCouranteId());
         for (var r:traces) if (r.getOperationBancaire().getId().equals(choix.operationId()) && r.getStatut()!=StatutRapprochement.ANNULE && traceCorrespondAuChoix(r, demande.etape(), choix)
@@ -855,14 +915,15 @@ public class TresorerieService {
             demande.perimetre()==null ? null : demande.perimetre().natureOperation(),demande.perimetre()==null ? null : demande.perimetre().statutClassification(),
             demande.perimetre()==null ? null : demande.perimetre().statutRapprochement(),List.of(choix.operationId()),
             demande.perimetre()==null ? null : demande.perimetre().importId(),
-            demande.perimetre()==null ? null : demande.perimetre().statutConsultation(), demande.perimetre()==null ? null : demande.perimetre().consultation());
-        var apercu=previsualiserAssistant(c,demande.etape(),demande.categorie(),seul,false);
+            demande.perimetre()==null ? null : demande.perimetre().statutConsultation(), demande.perimetre()==null ? null : demande.perimetre().consultation(),
+            demande.perimetre()==null ? null : demande.perimetre().rolesTiers());
+        var apercu=previsualiserAssistant(c,demande.etape(),demande.categorie(),seul,false,tiers);
         var ligne=apercu.lignes().stream().filter(l -> l.operation().id().equals(choix.operationId())).findFirst()
             .orElseThrow(() -> new RegleMetierException("OPERATION_INDISPONIBLE","Opération déjà traitée ou non éligible."));
         if (ligne.bloquee()) throw new RegleMetierException("OPERATION_BLOQUEE",String.join(" ; ",ligne.anomalies()));
         Candidat candidat=ligne.candidats().stream().filter(a -> a.cle().equals(choix.candidatCle()) && a.tiersId().equals(choix.tiersId()) && java.util.Objects.equals(a.pieceId(),choix.pieceId())).findFirst().orElse(null);
         if (candidat==null && demande.etape()==Etape.TIERS && choix.candidatCle().equals("MANUEL:"+choix.tiersId())) {
-            var t=tiersClient.listerTiersActifs(c).stream().filter(a -> choix.tiersId().equals(a.id()) && !Boolean.FALSE.equals(a.actif())).findFirst()
+            var t=tiers.stream().filter(a -> choix.tiersId().equals(a.id())).findFirst()
                 .orElseThrow(() -> new RegleMetierException("TIERS_INDISPONIBLE","Tiers actif de cette société obligatoire."));
             candidat=new Candidat(choix.candidatCle(),t.id(),t.libelle(),ClassificationOperationBancaireService.typeTiers(t.roles()),null,null,"TIERS",BigDecimal.ZERO,BigDecimal.ZERO,null,null,false,List.of("Choix manuel confirmé"),List.of(),null,null);
         }

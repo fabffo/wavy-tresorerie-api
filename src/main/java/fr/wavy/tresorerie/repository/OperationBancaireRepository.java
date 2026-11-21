@@ -84,7 +84,7 @@ public interface OperationBancaireRepository extends JpaRepository<OperationBanc
               and (:natureOperation is null or o.natureOperation = :natureOperation)
               and (:statutClassification is null or o.statutClassification = :statutClassification)
               and (:statutRapprochement is null or o.statutRapprochement = :statutRapprochement)
-            """ + FILTRES_CONSULTATION;
+            """ + FILTRES_CONSULTATION + " and (:filtrerTiers = false or o.tiersId in :tiersIds) ";
 
     @Query("select o " + OPERATIONS + " and (:filtrerIds = false or o.id in :ids)")
 
@@ -108,6 +108,8 @@ public interface OperationBancaireRepository extends JpaRepository<OperationBanc
             String statutConsultation,
             boolean filtrerIds,
             List<Long> ids,
+            boolean filtrerTiers,
+            List<Long> tiersIds,
             Pageable pageable
     );
     @Query("select " + STATUT_CONSULTATION + ", count(o), sum(case when o.tiersId is null then 1 else 0 end) " + OPERATIONS
@@ -116,5 +118,5 @@ public interface OperationBancaireRepository extends JpaRepository<OperationBanc
             LocalDate dateDebut, LocalDate dateFin, String libelle, BigDecimal montantMin, BigDecimal montantMax,
             SensOperation sens, TypeOperationBancaire typeOperation, String tiersReconnu, TypeTiersReconnu typeTiersReconnu,
             NatureOperationBancaire natureOperation, StatutClassificationOperation statutClassification,
-            StatutOperationBancaire statutRapprochement, Long importId, String statutConsultation);
+            StatutOperationBancaire statutRapprochement, Long importId, String statutConsultation, boolean filtrerTiers, List<Long> tiersIds);
 }

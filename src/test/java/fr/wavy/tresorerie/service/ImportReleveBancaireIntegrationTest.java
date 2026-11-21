@@ -95,7 +95,7 @@ class ImportReleveBancaireIntegrationTest {
         var etranger=new ContexteRequete(contexte.tenantId(),contexte.utilisateurId(),9999L,List.of("ADMIN_TENANT"),null);
         assertThat(tresorerie.compterOperations(etranger,filtres).total()).isZero();
         var page=tresorerie.listerOperations(contexte,null,null,null,null,null,null,null,null,null,null,
-                null,null,null,dernier,"PARTIELLE",0,1,"statutConsultation","ASC");
+                null,null,null,dernier,"PARTIELLE",0,1,"statutConsultation","ASC",null);
         var operation=page.getContent().get(0);
         assertThat(page.getTotalElements()).isEqualTo(1);
         assertThat(operation.numeroPieceAssociee()).isEqualTo("FAC-123");
@@ -124,7 +124,7 @@ class ImportReleveBancaireIntegrationTest {
         clearInvocations(tiers);
 
         var page = tresorerie.listerOperations(contexte, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, importId, null, 0, 10, "dateOperation", "ASC");
+                null, null, null, null, null, importId, null, 0, 10, "dateOperation", "ASC", null);
         assertThat(page.getContent()).hasSize(4);
         assertThat(page.getContent().get(0).rolesTiers()).containsExactly("PORTEUR_CARTE", "SALARIE");
         assertThat(page.getContent().get(0).pieceRapprochementAutorisee()).isTrue();
@@ -135,6 +135,77 @@ class ImportReleveBancaireIntegrationTest {
         var autreSociete = new ContexteRequete(contexte.tenantId(), contexte.utilisateurId(), 9999L, List.of("ADMIN_TENANT"), null);
         assertThat(tresorerie.listerOperations(autreSociete)).isEmpty();
         verify(tiers).listerTiersActifs(autreSociete);
+    }
+
+    @Test void triEtFiltresRolesPartagentLePerimetreDeConsultation() {
+        long importId = service.importer(contexte, compteId, csv("roles-tri.csv", entetes
+                + "01/01/2026;Tiers multirôle;10,00;\n02/01/2026;Tiers client;20,00;\n"
+                + "03/01/2026;Tiers marchand;30,00;\n04/01/2026;Tiers sans rôle;40,00;\n"
+                + "05/01/2026;Sans tiers;50,00;\n")).importId();
+        long autreImport = service.importer(contexte, compteId, csv("roles-annexe.csv", entetes
+                + "06/01/2026;Tiers multirôle annexe;60,00;\n")).importId();
+        jdbc.update("""
+                update operation_bancaire set tiers_reconnu = libelle, tiers_id = case libelle
+                    when 'Tiers multirôle' then 7 when 'Tiers client' then 8
+                    when 'Tiers marchand' then 9 when 'Tiers sans rôle' then 10
+                    when 'Tiers multirôle annexe' then 7 end,
+                    type_operation = 'VIREMENT_EMIS'
+                where import_releve_bancaire_id in (?, ?)
+                """, importId, autreImport);
+        when(tiers.listerTiersActifs(contexte)).thenReturn(List.of(
+                new TiersTresorerieDto(7L, Set.of("SALARIE", "PORTEUR_CARTE"), "Multirôle", null, null, null, true, false),
+                new TiersTresorerieDto(8L, Set.of("CLIENT"), "Client", null, null, null, true, false),
+                new TiersTresorerieDto(9L, Set.of("MARCHAND"), "Marchand", null, null, null, true, false),
+                new TiersTresorerieDto(10L, Set.of(), "Sans rôle", null, null, null, true, false),
+                new TiersTresorerieDto(11L, Set.of("CANDIDAT"), "Inactif", null, null, null, false, false)));
+
+        var premier = pageRoles(contexte, importId, null, null, null, 0, "ASC");
+        var suivant = pageRoles(contexte, importId, null, null, null, 1, "ASC");
+        assertThat(premier.getTotalElements()).isEqualTo(5);
+        assertThat(premier.map(o -> o.libelle()).getContent()).containsExactly("Tiers client", "Tiers marchand");
+        assertThat(suivant.map(o -> o.libelle()).getContent()).containsExactly("Tiers multirôle", "Sans tiers");
+        assertThat(pageRoles(contexte, importId, null, null, null, 0, "DESC").map(o -> o.libelle()).getContent())
+                .containsExactly("Tiers multirôle", "Tiers marchand");
+        assertThat(suivant.getContent().get(0).libellesRolesTiers()).isEqualTo("Porteur de carte, Salarié");
+
+        var roles = List.of("SALARIE", "MARCHAND");
+        assertThat(pageRoles(contexte, importId, null, null, List.of("PORTEUR_CARTE"), 0, "ASC").getTotalElements()).isOne();
+        assertThat(pageRoles(contexte, importId, null, null, roles, 0, "ASC").map(o -> o.libelle()).getContent())
+                .containsExactly("Tiers marchand", "Tiers multirôle");
+        var pageFiltree = pageRoles(contexte, importId, "Tiers multi", "TIERS_IDENTIFIE", roles, 0, "ASC");
+        assertThat(pageFiltree.map(o -> o.libelle()).getContent()).containsExactly("Tiers multirôle");
+        var perimetre = new Perimetre("Tiers multi", null, null, null, null, null, importId, "TIERS_IDENTIFIE", true, roles);
+        var compteurs = tresorerie.compterOperations(contexte, perimetre);
+        assertThat(compteurs.total()).isEqualTo(pageFiltree.getTotalElements());
+        assertThat(compteurs.tiersIdentifies()).isOne();
+        assertThat(compteurs.sansTiers()).isZero();
+        assertThat(compteurs.rolesTiersDisponibles()).extracting(fr.wavy.tresorerie.dto.RoleTiersConsultation::code)
+                .containsExactly("CLIENT", "MARCHAND", "PORTEUR_CARTE", "SALARIE");
+        assertThat(tresorerie.compterOperations(contexte, new Perimetre(null, null, null, null, null, null, importId, null, true))
+                .sansTiers()).isOne();
+        for (var etape : List.of(Etape.TIERS, Etape.SALAIRES, Etape.CLIENTS, Etape.FOURNISSEURS)) {
+            assertThat(tresorerie.previsualiserAssistant(contexte, etape, "CARTE", perimetre).operationsPerimetre()).isOne();
+        }
+
+        long id = pageFiltree.getContent().get(0).id();
+        when(tiers.listerTiersActifs(contexte)).thenReturn(List.of(
+                new TiersTresorerieDto(7L, Set.of("CLIENT"), "Ancien salarié", null, null, null, true, false)));
+        var choix = new Choix(id, "P:SALAIRE:1", 1L, 7L, BigDecimal.TEN, false, false, false);
+        var bilan = tresorerie.confirmerAssistant(contexte, new Confirmation(Etape.SALAIRES, perimetre, "CARTE", true, List.of(choix)));
+        assertThat(bilan.lignes()).extracting(Resultat::code).containsExactly("HORS_PERIMETRE");
+
+        for (var autre : List.of(
+                new ContexteRequete(9999L, 7102L, 7103L, List.of("ADMIN_TENANT"), null),
+                new ContexteRequete(7101L, 7102L, 9999L, List.of("ADMIN_TENANT"), null))) {
+            assertThat(pageRoles(autre, importId, null, null, roles, 0, "ASC")).isEmpty();
+            assertThat(tresorerie.compterOperations(autre, perimetre).total()).isZero();
+        }
+    }
+
+    private org.springframework.data.domain.Page<fr.wavy.tresorerie.dto.OperationBancaireReponse> pageRoles(
+            ContexteRequete c, long importId, String tiersReconnu, String statut, List<String> roles, int page, String direction) {
+        return tresorerie.listerOperations(c, null, null, null, null, null, null, null, null, tiersReconnu,
+                null, null, null, null, importId, statut, page, 2, "rolesTiers", direction, roles);
     }
 
     @Test void conserveLesOccurrencesEtReimporteSansDoublons() {

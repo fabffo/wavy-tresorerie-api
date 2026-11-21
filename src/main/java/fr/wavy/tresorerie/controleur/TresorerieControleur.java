@@ -134,6 +134,7 @@ public class TresorerieControleur {
             @RequestParam(required = false) StatutOperationBancaire statutRapprochement,
             @RequestParam(required = false) Long importId,
             @RequestParam(required = false) String statutConsultation,
+            @RequestParam(required = false) List<String> rolesTiers,
             @RequestParam(defaultValue = "0") Integer page,
             @RequestParam(defaultValue = "25") Integer size,
             @RequestParam(defaultValue = "dateOperation") String sortBy,
@@ -142,7 +143,7 @@ public class TresorerieControleur {
         return tresorerieService.listerOperations(
                 contexte(request), compteBancaireId, dateDebut, dateFin, libelle, montantMin, montantMax,
                 sens, typeOperation, tiersReconnu, typeTiersReconnu, natureOperation, statutClassification, statutRapprochement,
-                importId, statutConsultation, page, size, sortBy, sortDirection);
+                importId, statutConsultation, page, size, sortBy, sortDirection, rolesTiers);
     }
 
     @GetMapping("/operations-bancaires/compteurs")

@@ -98,6 +98,24 @@ class SecuriteRecetteTest {
     }
 
     @Test
+    void rolesRepetesSontLusDansLesCompteursEtLApercu() throws Exception {
+        var etape = fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.SALAIRES;
+        for (var suffixe : List.of("/compteurs", "/assistant")) {
+            mockMvc.perform(get("/api/tresorerie/operations-bancaires" + suffixe)
+                    .param("etape", "SALAIRES").param("consultation", "true")
+                    .param("rolesTiers", "SALARIE", "PORTEUR_CARTE")
+                    .header("Authorization", "Bearer jeton-test").header("X-Tenant-Id", 3)
+                    .header("X-Utilisateur-Id", 7).header("X-Societe-Courante-Id", 11))
+                    .andExpect(status().isOk());
+        }
+        org.mockito.Mockito.verify(tresorerieService).compterOperations(any(),
+                org.mockito.ArgumentMatchers.argThat(p -> List.of("SALARIE", "PORTEUR_CARTE").equals(p.rolesTiers())));
+        org.mockito.Mockito.verify(tresorerieService).previsualiserAssistant(any(), org.mockito.ArgumentMatchers.eq(etape),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.argThat(p -> List.of("SALARIE", "PORTEUR_CARTE").equals(p.rolesTiers())));
+    }
+
+    @Test
     void preflightPutDepuisErpShellRecetteEstAccepte() throws Exception {
         mockMvc.perform(options("/api/tresorerie/comptes-bancaires/1")
                         .header(HttpHeaders.ORIGIN, "http://localhost:24207")

@@ -46,6 +46,7 @@ public record OperationBancaireReponse(
         BigDecimal montantRapproche,
         String numeroPieceAssociee,
         Long pieceRapprochementId,
-        List<String> rolesTiers
+        List<String> rolesTiers,
+        String libellesRolesTiers
 ) {
 }
