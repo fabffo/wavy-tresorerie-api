@@ -3,6 +3,7 @@ package fr.wavy.tresorerie.dto;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import fr.wavy.tresorerie.modele.NatureOperationBancaire;
 import fr.wavy.tresorerie.modele.SensOperation;
@@ -44,6 +45,7 @@ public record OperationBancaireReponse(
         LocalDateTime dateRapprochement,
         BigDecimal montantRapproche,
         String numeroPieceAssociee,
-        Long pieceRapprochementId
+        Long pieceRapprochementId,
+        List<String> rolesTiers
 ) {
 }

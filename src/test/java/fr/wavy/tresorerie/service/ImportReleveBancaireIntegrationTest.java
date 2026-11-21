@@ -22,6 +22,7 @@ import fr.wavy.tresorerie.client.FacturesTresorerieClient;
 import fr.wavy.tresorerie.dto.AssistantRapprochementDto.*;
 import fr.wavy.tresorerie.configuration.ContexteRequete;
 import fr.wavy.tresorerie.dto.OperationBancaireDemande;
+import fr.wavy.tresorerie.dto.TiersTresorerieDto;
 import fr.wavy.tresorerie.modele.*;
 import fr.wavy.tresorerie.repository.*;
 import fr.wavy.tresorerie.service.importreleve.*;
@@ -105,6 +106,35 @@ class ImportReleveBancaireIntegrationTest {
         assertThat(detail.historique()).hasSize(1);
         assertThatThrownBy(() -> tresorerie.previsualiserAssistant(contexte,Etape.SALAIRES,"CARTE",filtres))
                 .hasMessageContaining("3 opérations restent à identifier");
+    }
+
+    @Test void consultationAfficheLesRolesActifsDuTiersAssocie() {
+        long importId = service.importer(contexte, compteId, csv("roles.csv", entetes
+                + "01/01/2026;Multirôles;10,00;\n02/01/2026;Tiers inactif;20,00;\n"
+                + "03/01/2026;Sans tiers;30,00;\n04/01/2026;Tiers absent;40,00;\n")).importId();
+        jdbc.update("""
+                update operation_bancaire set tiers_id = case libelle
+                    when 'Multirôles' then 7 when 'Tiers inactif' then 8 when 'Tiers absent' then 9 end,
+                    type_tiers_reconnu = 'CLIENT'
+                where import_releve_bancaire_id = ?
+                """, importId);
+        when(tiers.listerTiersActifs(contexte)).thenReturn(List.of(
+                new TiersTresorerieDto(7L, Set.of("SALARIE", "PORTEUR_CARTE"), null, "Nom", "Prénom", null, true, true),
+                new TiersTresorerieDto(8L, Set.of("MARCHAND"), "Inactif", null, null, null, false, false)));
+        clearInvocations(tiers);
+
+        var page = tresorerie.listerOperations(contexte, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, importId, null, 0, 10, "dateOperation", "ASC");
+        assertThat(page.getContent()).hasSize(4);
+        assertThat(page.getContent().get(0).rolesTiers()).containsExactly("PORTEUR_CARTE", "SALARIE");
+        assertThat(page.getContent().get(0).pieceRapprochementAutorisee()).isTrue();
+        assertThat(page.getContent().subList(1, 4)).allSatisfy(operation -> assertThat(operation.rolesTiers()).isEmpty());
+        verify(tiers).listerTiersActifs(contexte);
+        verifyNoMoreInteractions(tiers);
+
+        var autreSociete = new ContexteRequete(contexte.tenantId(), contexte.utilisateurId(), 9999L, List.of("ADMIN_TENANT"), null);
+        assertThat(tresorerie.listerOperations(autreSociete)).isEmpty();
+        verify(tiers).listerTiersActifs(autreSociete);
     }
 
     @Test void conserveLesOccurrencesEtReimporteSansDoublons() {

@@ -218,10 +218,11 @@ public class TresorerieService {
 
     @Transactional(readOnly = true)
     public List<OperationBancaireReponse> listerOperations(ContexteRequete contexte) {
-        Map<Long, Boolean> autorisationsFactureRapprochement = autorisationsFactureRapprochement(contexte);
+        var tiersParId = tiersClient.listerTiersActifs(contexte).stream()
+                .collect(Collectors.groupingBy(TiersTresorerieDto::id));
         return operationRepository.findByTenantIdAndSocieteInterneIdAndActifTrueOrderByDateOperationDescIdDesc(contexte.tenantId(), contexte.societeCouranteId())
                 .stream()
-                .map(operation -> mapper.versReponse(operation, autorisationFactureRapprochement(operation, autorisationsFactureRapprochement)))
+                .map(operation -> reponseOperationListe(operation, tiersParId))
                 .toList();
     }
 
@@ -249,16 +250,25 @@ public class TresorerieService {
             String sortDirection
     ) {
         Pageable pageable = pageableOperations(page, size, sortBy, sortDirection);
-        Map<Long, Boolean> autorisationsFactureRapprochement = autorisationsFactureRapprochement(contexte);
+        var tiersParId = tiersClient.listerTiersActifs(contexte).stream()
+                .collect(Collectors.groupingBy(TiersTresorerieDto::id));
         return operationRepository.rechercher(
                         contexte.tenantId(), contexte.societeCouranteId(), compteBancaireId, dateDebut, dateFin,
                         libelle == null ? "" : libelle.trim(), montantMin, montantMax, sens, typeOperation,
                         tiersReconnu == null ? "" : tiersReconnu.trim(), typeTiersReconnu, natureOperation, statutClassification,
                         statutRapprochement, importId, statutConsultation, false, List.of(0L), pageable)
-                .map(operation -> mapper.versReponse(
-                        operation,
-                        autorisationFactureRapprochement(operation, autorisationsFactureRapprochement)
-                ));
+                .map(operation -> reponseOperationListe(operation, tiersParId));
+    }
+
+    private OperationBancaireReponse reponseOperationListe(OperationBancaire operation, Map<Long, List<TiersTresorerieDto>> tiersParId) {
+        if (operation.getTiersId() == null) return mapper.versReponse(operation);
+        var fiches = tiersParId.getOrDefault(operation.getTiersId(), List.of());
+        boolean pieceAutorisee = fiches.stream().anyMatch(tiers -> Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()));
+        var roles = fiches.stream()
+                .filter(tiers -> !Boolean.FALSE.equals(tiers.actif()) && tiers.roles() != null)
+                .flatMap(tiers -> tiers.roles().stream())
+                .distinct().sorted().toList();
+        return mapper.versReponse(operation, pieceAutorisee, roles);
     }
 
     @Transactional(readOnly = true)

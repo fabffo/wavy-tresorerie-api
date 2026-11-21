@@ -1,5 +1,7 @@
 package fr.wavy.tresorerie.mapper;
 
+import java.util.List;
+
 import org.springframework.stereotype.Component;
 
 import fr.wavy.tresorerie.dto.CompteBancaireDto;
@@ -42,6 +44,10 @@ public class TresorerieMapper {
     }
 
     public OperationBancaireReponse versReponse(OperationBancaire operation, Boolean pieceRapprochementAutorisee) {
+        return versReponse(operation, pieceRapprochementAutorisee, List.of());
+    }
+
+    public OperationBancaireReponse versReponse(OperationBancaire operation, Boolean pieceRapprochementAutorisee, List<String> rolesTiers) {
         return new OperationBancaireReponse(
                 operation.getId(),
                 operation.getCompteBancaire().getId(),
@@ -74,7 +80,8 @@ public class TresorerieMapper {
                 operation.getDateRapprochement(),
                 operation.getMontantRapproche(),
                 operation.getNumeroPieceAssociee(),
-                operation.getPieceRapprochementId()
+                operation.getPieceRapprochementId(),
+                rolesTiers
         );
     }
 
