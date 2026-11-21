@@ -476,6 +476,17 @@ public class TresorerieService {
     }
 
     private boolean concerneDomaine(Etape e, OperationBancaire o, Set<String> roles) {
+        return switch (e) {
+            case TIERS -> true;
+            case SALAIRES -> o.getSens()==SensOperation.DEBIT && roles.contains("SALARIE")
+                    && o.getTypeOperation()==TypeOperationBancaire.VIREMENT_EMIS;
+            case CLIENTS -> o.getSens()==SensOperation.CREDIT && roles.contains("CLIENT");
+            case FOURNISSEURS -> o.getSens()==SensOperation.DEBIT && ClassificationOperationBancaireService.roleFournisseur(roles);
+            default -> false;
+        };
+    }
+
+    private boolean concerneCreationSansFacture(Etape e, OperationBancaire o, Set<String> roles) {
         boolean debit=o.getSens()==SensOperation.DEBIT;
         return switch (e) {
             case TIERS -> true;
@@ -524,20 +535,16 @@ public class TresorerieService {
         for (var o:scope) {
             var t=parTiers.get(o.getTiersId());
             var roles=t==null || t.roles()==null ? Set.<String>of() : t.roles();
-            if (consultation && !concerneDomaine(e, o, roles)) continue;
+            boolean repriseHistorique = consultation && e!=Etape.TIERS && traces.stream().anyMatch(r -> r.getOperationBancaire().getId().equals(o.getId())
+                    && r.getStatut()==StatutRapprochement.PROPOSE && r.isPaiementEngage()
+                    && (e==Etape.SALAIRES && etapeTrace(r)==Etape.NOTES_FRAIS && !PaiementAchatRapprochementService.carte(r.getModeRapprochement())
+                        || e==Etape.FOURNISSEURS && PaiementAchatRapprochementService.carte(r.getModeRapprochement())
+                        || e==etapeTrace(r)));
+            if (consultation && !concerneDomaine(e, o, roles) && !repriseHistorique) continue;
             Etape etape=e;
             String famille=categorie;
-            if (consultation && e==Etape.SALAIRES && PaiementAchatRapprochementService.remboursement(o)) {
-                etape=Etape.NOTES_FRAIS;
-                famille="REMBOURSEMENT";
-            }
-            boolean carteEntreprise = consultation && e==Etape.FOURNISSEURS && o.getTypeOperation()==TypeOperationBancaire.PAIEMENT_CB;
-            if (carteEntreprise && (cartes.stream().anyMatch(piece -> RapprochementCarteMatcher.comparer(o,piece)
-                    .filter(a -> !a.conflit()).isPresent()) || traces.stream().anyMatch(r -> r.getOperationBancaire().getId().equals(o.getId())
-                    && r.getStatut()!=StatutRapprochement.ANNULE && "CARTE_ENTREPRISE".equals(r.getModeRapprochement())))) {
-                etape=Etape.NOTES_FRAIS;
-                famille="CARTE";
-            }
+            boolean carteEntreprise = consultation && e==Etape.FOURNISSEURS
+                    && o.getTypeOperation()==TypeOperationBancaire.PAIEMENT_CB && roles.contains("MARCHAND");
             final Etape parcours=etape;
             if (!consultation && !concerneAssistant(etape,famille,o)) continue;
             if (consultation && e==Etape.TIERS && o.getTiersId()!=null) { traitees++; continue; }
@@ -564,10 +571,15 @@ public class TresorerieService {
                 }
             }
             var enReprise=traces.stream().filter(r -> r.getOperationBancaire().getId().equals(o.getId()) && r.getStatut()==StatutRapprochement.PROPOSE
-                    && r.isPaiementEngage() && etapeTrace(r)==parcours).findFirst();
+                    && r.isPaiementEngage() && (etapeTrace(r)==parcours
+                        || consultation && etapeTrace(r)==Etape.NOTES_FRAIS
+                            && (e==Etape.FOURNISSEURS && PaiementAchatRapprochementService.carte(r.getModeRapprochement())
+                                || e==Etape.SALAIRES && !PaiementAchatRapprochementService.carte(r.getModeRapprochement())))).findFirst();
             if (engage && etape!=Etape.TIERS && etape!=Etape.PIECES && enReprise.isPresent()) {
                 var r=enReprise.get();Long piece=r.getTypeFacture()==TypeFactureRapprochement.SALAIRE ? r.getSalaireId() : r.getFactureId();
-                String cle="CARTE_ENTREPRISE".equals(r.getModeRapprochement()) ? "C:"+piece : "P:"+r.getTypeFacture()+":"+piece;
+                String cle=PaiementAchatRapprochementService.carte(r.getModeRapprochement()) ? "C:"+piece
+                        : "P:"+(PaiementAchatRapprochementService.ROLE_REMBOURSEMENT.equals(r.getModeRapprochement())
+                            ? "REMBOURSEMENT" : r.getTypeFacture())+":"+piece;
                 candidats.add(new Candidat(cle,o.getTiersId(),o.getTiersReconnu(),o.getTypeTiersReconnu(),piece,r.getDocumentAssocieNumero(),r.getTypeFacture().name(),
                     r.getMontantRapproche(),r.getMontantRapproche(),null,null,false,List.of("Intention de paiement durable "+r.getId()),List.of("Résultat à reprendre avec les mêmes références"),null,null));
                 lignes.add(new Ligne(mapper.versReponse(o,t!=null && Boolean.TRUE.equals(t.pieceRapprochementAutorisee())),List.copyOf(candidats),List.copyOf(anomalies),false));
@@ -599,25 +611,7 @@ public class TresorerieService {
                 if (trouves.isEmpty()) anomalies.add("Aucun tiers proposé : rechercher dans Tiers avant une création explicite.");
                 if (o.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE) anomalies.add("Classification manuelle conservée.");
             } else if (etape==Etape.NOTES_FRAIS && !"REMBOURSEMENT".equals(famille)) {
-                for (var piece:cartes) RapprochementCarteMatcher.comparer(o,piece).ifPresent(a -> {
-                    boolean ambigu=autresCartes.stream().anyMatch(autre -> !autre.getId().equals(o.getId()) && RapprochementCarteMatcher.comparer(autre,piece).isPresent())
-                        || cartes.stream().anyMatch(autre -> !autre.id().equals(piece.id()) && RapprochementCarteMatcher.comparer(o,autre).isPresent());
-                    boolean conflit=a.conflit() || traces.stream().anyMatch(r -> (r.getStatut()==StatutRapprochement.PROPOSE || r.getStatut()==StatutRapprochement.VALIDE)
-                        && (r.getOperationBancaire().getId().equals(o.getId()) || (r.getTypeFacture()==TypeFactureRapprochement.ACHAT && piece.id().equals(r.getFactureId())))
-                        && !(r.getOperationBancaire().getId().equals(o.getId()) && piece.id().equals(r.getFactureId()) && "CARTE_ENTREPRISE".equals(r.getModeRapprochement())));
-                    boolean natureManuelleIncompatible = consultation && o.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE
-                            && o.getNatureOperation()!=NatureOperationBancaire.FACTURE_FOURNISSEUR;
-                    conflit = conflit || natureManuelleIncompatible;
-                    var carte=a.avecConflits(ambigu,conflit);var avert=new ArrayList<String>();
-                    if (ambigu) avert.add("Opération ou pièce partagée avec une autre proposition");
-                    if (natureManuelleIncompatible) avert.add("Vérifiez la classification manuelle dans le détail de l’opération.");
-                    else if (conflit) avert.add("Conflit de tiers ou de réservation");
-                    if (a.dateAtypique()) avert.add("Date atypique : vérifier explicitement le justificatif");
-                    if (!a.commercantReconnu()) avert.add("Commerçant non concordant : vérifier le justificatif");
-                    candidats.add(new Candidat("C:"+piece.id(),piece.tiersId(),piece.nomTiers(),TypeTiersReconnu.FOURNISSEUR,piece.id(),piece.numeroPiece(),"ACHAT",
-                        piece.montant(),a.montantRapproche(),piece.dateDepense(),null,!ambigu && !conflit && !a.dateAtypique() && a.commercantReconnu() && a.ecart().signum()==0,
-                        a.criteres(),List.copyOf(avert),null,carte));
-                });
+                ajouterCandidatsCarte(o, cartes, autresCartes, traces, candidats, false);
             } else if (etape==Etape.PIECES) {
                 var raisons=raisonsPieceAutomatique(c,o,t,traces,cache);
                 if (raisons.isEmpty()) {
@@ -634,30 +628,44 @@ public class TresorerieService {
                     boolean role=type==TypeFactureRapprochement.VENTE ? o.getTypeTiersReconnu()==TypeTiersReconnu.CLIENT : type==TypeFactureRapprochement.SALAIRE ? o.getTypeTiersReconnu()==TypeTiersReconnu.SALARIE
                         : etape==Etape.NOTES_FRAIS || List.of(TypeTiersReconnu.FOURNISSEUR,TypeTiersReconnu.FOURNISSEUR_SERVICE).contains(o.getTypeTiersReconnu()==null ? TypeTiersReconnu.AUTRE : o.getTypeTiersReconnu());
                     if (!(consultation || role)) { anomalies.add("Rôle du tiers bancaire incompatible avec cette étape");bloque=true; }
-                    if (etape==Etape.FOURNISSEURS && o.getNatureOperation()!=NatureOperationBancaire.FACTURE_FOURNISSEUR
-                            && (!consultation || !natureFournisseurSansFacture(o.getNatureOperation()))) { anomalies.add("Nature à vérifier séparément à l'étape 1");bloque=true; }
-                    if (consultation && etape==Etape.SALAIRES && o.getNatureOperation()!=NatureOperationBancaire.SALAIRE
-                            && o.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE) {
-                        anomalies.add("La classification manuelle ne permet pas de proposer un salaire."); bloque=true;
-                    }
-                    if (consultation && etape==Etape.CLIENTS && o.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE
-                            && o.getNatureOperation()!=NatureOperationBancaire.FACTURE_CLIENT) {
-                        anomalies.add("La classification manuelle ne permet pas de proposer une facture client."); bloque=true;
+                    if (!consultation && etape==Etape.FOURNISSEURS && o.getNatureOperation()!=NatureOperationBancaire.FACTURE_FOURNISSEUR) {
+                        anomalies.add("Nature à vérifier séparément à l'étape 1"); bloque=true;
                     }
                     if ((etape==Etape.SALAIRES || etape==Etape.NOTES_FRAIS) && o.getTypeOperation()!=TypeOperationBancaire.VIREMENT_EMIS) { anomalies.add("Virement émis attendu");bloque=true; }
+                    if (carteEntreprise) ajouterCandidatsCarte(o, cartes, autresCartes, traces, candidats, true);
                     String cle=type+":"+t.id()+":"+etape+":"+periodeSalaireOperation(o.getDateOperation());
                     var factures=cache.computeIfAbsent(cle,k -> {
                         if (parcours==Etape.SALAIRES) { var periode=periodeSalaireOperation(o.getDateOperation());return facturesClient.listerSalairesOuverts(c,t.id(),periode.getYear(),periode.getMonthValue(),null); }
                         if (parcours==Etape.NOTES_FRAIS) return facturesClient.listerFacturesAchatNotesFraisOuvertes(c,t.id(),null);
                         return facturesClient.listerFacturesOuvertes(c,type,t.id()).stream().filter(f -> type!=TypeFactureRapprochement.ACHAT || !idsCartes.contains(f.id())).toList();
                     });
-                    BigDecimal disponible=montantOperation(o).subtract(nulZero(o.getMontantRapproche())).max(BigDecimal.ZERO);
-                    Set<Long> dejaAssociees = traces.stream().filter(r -> r.getOperationBancaire().getId().equals(o.getId())
-                            && r.getTypeFacture()==type && r.getStatut()==StatutRapprochement.VALIDE)
-                            .map(r -> type==TypeFactureRapprochement.SALAIRE ? r.getSalaireId() : r.getFactureId()).collect(Collectors.toSet());
-                    for (var f:factures) if (f.tiersId().equals(t.id()) && f.resteAPayer().signum()>0 && !dejaAssociees.contains(f.id())) {
+                    var pieces = new ArrayList<>(factures);
+                    if (consultation && etape==Etape.SALAIRES) {
+                        pieces.addAll(cache.computeIfAbsent("BENEFICIAIRE:"+t.id(),
+                                k -> facturesClient.listerFacturesAchatNotesFraisOuvertes(c,t.id(),null)));
+                    }
+                    BigDecimal affecte = consultation ? traces.stream()
+                            .filter(r -> o.getId().equals(r.getOperationBancaire().getId()) && r.getStatut()==StatutRapprochement.VALIDE)
+                            .map(RapprochementBancaire::getMontantRapproche).reduce(BigDecimal.ZERO, BigDecimal::add)
+                            : nulZero(o.getMontantRapproche());
+                    BigDecimal disponible=montantOperation(o).subtract(affecte).max(BigDecimal.ZERO);
+                    boolean autreFamillePossible = consultation && roles.contains("SALARIE")
+                            && ClassificationOperationBancaireService.roleFournisseur(roles)
+                            && o.getTypeOperation()==TypeOperationBancaire.VIREMENT_EMIS
+                            && autreFamilleAvecMontant(c, etape, t.id(), o.getDateOperation(), disponible, cache);
+                    for (var f:pieces) {
+                        TypeFactureRapprochement typeCandidat = consultation && etape==Etape.SALAIRES && "ACHAT".equals(f.typeFacture())
+                                ? TypeFactureRapprochement.ACHAT : type;
+                        if (!t.id().equals(f.tiersId()) || f.resteAPayer().signum()<=0
+                                || consultation && "DEPENSE_CARTE_ENTREPRISE".equals(f.typePiece())
+                                || traces.stream().anyMatch(r -> r.getOperationBancaire().getId().equals(o.getId())
+                                    && r.getTypeFacture()==typeCandidat && r.getStatut()==StatutRapprochement.VALIDE
+                                    && f.id().equals(typeCandidat==TypeFactureRapprochement.SALAIRE ? r.getSalaireId() : r.getFactureId()))) continue;
                         var criteres=new ArrayList<String>();var alertes=new ArrayList<String>();
                         criteres.add("Même tiers, tenant et société ; pièce validée et ouverte");
+                        if (consultation && etape==Etape.SALAIRES && typeCandidat==TypeFactureRapprochement.ACHAT)
+                            criteres.add("Remboursement bénéficiaire");
+                        if (autreFamillePossible) criteres.add("Une autre famille de pièces correspond au montant");
                         boolean exact=disponible.compareTo(f.resteAPayer())==0;
                         criteres.add(exact ? "Montant restant exact" : "Affectation partielle ou plusieurs pièces à vérifier");
                         LocalDate date=RapprochementCarteMatcher.dateAchat(o.getLibelle(),o.getDateOperation());
@@ -666,11 +674,12 @@ public class TresorerieService {
                         criteres.add("Date d'achat : "+reference+" ; facture : "+f.dateFacture()+" ; échéance : "+f.dateEcheance());
                         boolean numero=f.numeroFacture()!=null && normaliserPourMatching(o.getLibelle()).contains(normaliserPourMatching(f.numeroFacture()));
                         if (numero) criteres.add("Référence de pièce présente dans le libellé");
-                        if (!proches && type!=TypeFactureRapprochement.SALAIRE) alertes.add("Dates éloignées : consulter le justificatif");
-                        boolean ambigu=factures.stream().filter(a -> a.resteAPayer().compareTo(disponible)==0).count()>1;
+                        if (!proches && typeCandidat!=TypeFactureRapprochement.SALAIRE) alertes.add("Dates éloignées : consulter le justificatif");
+                        boolean ambigu=pieces.stream().filter(a -> a.resteAPayer().compareTo(disponible)==0).count()>1;
                         if (ambigu) alertes.add("Plusieurs pièces de même montant : aucun choix automatique");
-                        candidats.add(new Candidat("P:"+type+":"+f.id(),t.id(),t.libelle(),o.getTypeTiersReconnu(),f.id(),f.numeroFacture(),type.name(),f.resteAPayer(),
-                            disponible.min(f.resteAPayer()),f.dateFacture(),f.dateEcheance(),exact && !ambigu && (proches || numero || type==TypeFactureRapprochement.SALAIRE),List.copyOf(criteres),List.copyOf(alertes),null,null));
+                        candidats.add(new Candidat("P:"+(consultation && etape==Etape.SALAIRES && typeCandidat==TypeFactureRapprochement.ACHAT
+                                ? "REMBOURSEMENT" : typeCandidat)+":"+f.id(),t.id(),t.libelle(),o.getTypeTiersReconnu(),f.id(),f.numeroFacture(),typeCandidat.name(),f.resteAPayer(),
+                            disponible.min(f.resteAPayer()),f.dateFacture(),f.dateEcheance(),exact && !ambigu && !autreFamillePossible && (proches || numero || typeCandidat==TypeFactureRapprochement.SALAIRE),List.copyOf(criteres),List.copyOf(alertes),null,null));
                     }
                     if (candidats.isEmpty()) anomalies.add("Aucune pièce ouverte pour ce tiers et cette étape");
                 }
@@ -684,7 +693,11 @@ public class TresorerieService {
                 if (o.getTypeOperation()==TypeOperationBancaire.PAIEMENT_CB) {
                     raisons=List.of("Une pièce carte ou une facture existante doit être disponible.");
                 }
-                if (raisons.isEmpty() && !bloque) {
+                if (raisons.isEmpty() && !bloque && concerneCreationSansFacture(e,o,roles)
+                        && (e!=Etape.FOURNISSEURS || o.getNatureOperation()==NatureOperationBancaire.FACTURE_FOURNISSEUR || natureFournisseurSansFacture(o.getNatureOperation()))
+                        && (o.getStatutClassification()!=StatutClassificationOperation.CLASSEE_MANUELLE
+                            || (e!=Etape.CLIENTS || o.getNatureOperation()==NatureOperationBancaire.FACTURE_CLIENT)
+                                && (e!=Etape.SALAIRES || o.getNatureOperation()==NatureOperationBancaire.SALAIRE))) {
                     var type=determinerTypePiece(o);
                     candidats.add(new Candidat("CREATION",t.id(),t.libelle(),o.getTypeTiersReconnu(),null,"À créer",type.name(),
                             montantOperation(o),montantOperation(o),o.getDateOperation(),null,false,
@@ -708,6 +721,45 @@ public class TresorerieService {
         BigDecimal montant=lignes.stream().filter(l -> !l.bloquee() && !l.candidats().isEmpty()).map(l -> l.operation().debit()==null ? l.operation().montant().abs() : (l.operation().sens()==SensOperation.DEBIT ? l.operation().debit() : l.operation().credit())).reduce(BigDecimal.ZERO,BigDecimal::add);
         return new Apercu(e,categorie,scope.size(),eligibles,(int)toutes.stream().filter(a -> a.pieceId()!=null).map(a -> a.typePiece()+":"+a.pieceId()).distinct().count(),
             toutes.size(),(int)lignes.stream().filter(l -> !l.anomalies().isEmpty() || l.candidats().stream().anyMatch(a -> !a.avertissements().isEmpty())).count(),traitees,lignes.size(),montant,List.copyOf(lignes));
+    }
+
+    private boolean autreFamilleAvecMontant(ContexteRequete c, Etape etape, Long tiersId, LocalDate date,
+            BigDecimal disponible, Map<String, List<FactureOuverteRapprochementDto>> cache) {
+        var periode = periodeSalaireOperation(date);
+        if (etape==Etape.SALAIRES)
+            return cache.computeIfAbsent("ACHAT:ROLE:"+tiersId,
+                    k -> facturesClient.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,tiersId))
+                    .stream().anyMatch(f -> tiersId.equals(f.tiersId()) && disponible.compareTo(f.resteAPayer())==0
+                            && !"DEPENSE_CARTE_ENTREPRISE".equals(f.typePiece()));
+        return cache.computeIfAbsent("SALAIRE:"+tiersId+":"+Etape.SALAIRES+":"+periode,
+                k -> facturesClient.listerSalairesOuverts(c,tiersId,periode.getYear(),periode.getMonthValue(),null))
+                .stream().anyMatch(f -> tiersId.equals(f.tiersId()) && disponible.compareTo(f.resteAPayer())==0)
+                || cache.computeIfAbsent("BENEFICIAIRE:"+tiersId,
+                    k -> facturesClient.listerFacturesAchatNotesFraisOuvertes(c,tiersId,null))
+                    .stream().anyMatch(f -> tiersId.equals(f.tiersId()) && disponible.compareTo(f.resteAPayer())==0);
+    }
+
+    private void ajouterCandidatsCarte(OperationBancaire o, List<PieceCarteRapprochementDto> cartes,
+            List<OperationBancaire> autresCartes, List<RapprochementBancaire> traces, List<Candidat> candidats, boolean consultation) {
+        for (var piece:cartes) RapprochementCarteMatcher.comparer(o,piece).ifPresent(a -> {
+            boolean ambigu=autresCartes.stream().anyMatch(autre -> !autre.getId().equals(o.getId()) && RapprochementCarteMatcher.comparer(autre,piece).isPresent())
+                || cartes.stream().anyMatch(autre -> !autre.id().equals(piece.id()) && RapprochementCarteMatcher.comparer(o,autre).isPresent());
+            boolean conflit=a.conflit() || traces.stream().anyMatch(r -> (r.getStatut()==StatutRapprochement.PROPOSE || r.getStatut()==StatutRapprochement.VALIDE)
+                && (r.getOperationBancaire().getId().equals(o.getId()) || (r.getTypeFacture()==TypeFactureRapprochement.ACHAT && piece.id().equals(r.getFactureId())))
+                && !(r.getOperationBancaire().getId().equals(o.getId()) && piece.id().equals(r.getFactureId())
+                    && (consultation ? PaiementAchatRapprochementService.carte(r.getModeRapprochement()) : "CARTE_ENTREPRISE".equals(r.getModeRapprochement()))));
+            if (consultation && a.conflit()) return;
+            var carte=a.avecConflits(ambigu,conflit);
+            if (consultation) carte = carte.sansAffectation();
+            var avert=new ArrayList<String>();
+            if (ambigu) avert.add("Opération ou pièce partagée avec une autre proposition");
+            if (conflit) avert.add("Conflit de tiers ou de réservation");
+            if (a.dateAtypique()) avert.add("Date atypique : vérifier explicitement le justificatif");
+            if (!a.commercantReconnu()) avert.add("Commerçant non concordant : vérifier le justificatif");
+            candidats.add(new Candidat("C:"+piece.id(),piece.tiersId(),piece.nomTiers(),TypeTiersReconnu.FOURNISSEUR,piece.id(),piece.numeroPiece(),"ACHAT",
+                piece.montant(),a.montantRapproche(),piece.dateDepense(),null,!ambigu && !conflit && !a.dateAtypique() && a.commercantReconnu() && a.ecart().signum()==0,
+                a.criteres(),List.copyOf(avert),null,carte));
+        });
     }
 
     private void verifierTiersIdentifies(ContexteRequete c, Etape e, Perimetre p) {
@@ -756,7 +808,9 @@ public class TresorerieService {
                     || ((demande.etape()==Etape.TIERS || demande.etape()==Etape.PIECES || (demande.etape()==Etape.NOTES_FRAIS && !"REMBOURSEMENT".equals(demande.categorie())))
                        && demande.selections().stream().filter(a -> a.operationId().equals(choix.operationId())).count()>1))
                     throw new RegleMetierException("DOUBLON","Une même opération ou proposition apparaît plusieurs fois.");
-                if (choix.pieceId()!=null && demande.selections().stream().anyMatch(a -> !a.operationId().equals(choix.operationId()) && choix.pieceId().equals(a.pieceId())))
+                if (choix.pieceId()!=null && demande.selections().stream().anyMatch(a -> !a.operationId().equals(choix.operationId()) && choix.pieceId().equals(a.pieceId())
+                        && ((demande.perimetre()==null || !Boolean.TRUE.equals(demande.perimetre().consultation()))
+                            || famillePiece(choix.candidatCle()).equals(famillePiece(a.candidatCle())))))
                     throw new RegleMetierException("CONFLIT_PIECE","Une pièce est sélectionnée sur plusieurs opérations : traiter individuellement.");
                 Long id=confirmerChoixAssistant(c,demande,choix,nombreOperations>1,certainesDuPerimetre);
                 resultat.add(new Resultat(choix.operationId(),"SUCCES",null,"Traitement confirmé.",id));
@@ -873,14 +927,22 @@ public class TresorerieService {
             if ((retenu.carte().dateAtypique() || !retenu.carte().commercantReconnu()) && !choix.verifierJustificatif())
                 throw new RegleMetierException("JUSTIFICATIF_REQUIS","Vérifiez explicitement le justificatif pour cette date ou ce commerçant.");
             if (retenu.carte().conflit()) throw new RegleMetierException("CONFLIT_CARTE","Tiers incompatible ou pièce déjà réservée.");
+            if (demande.perimetre()!=null && Boolean.TRUE.equals(demande.perimetre().consultation()) && demande.etape()==Etape.FOURNISSEURS) {
+                return paiementsAchats.confirmerCarteParRole(c, choix.operationId(), retenu.pieceId(),
+                        choix.montant(), choix.verifierJustificatif());
+            }
             return paiementsAchats.confirmerCarte(c,choix.operationId(),new ConfirmationCarteDemande(retenu.pieceId(),retenu.tiersId(),true,choix.confirmerAffectation(),choix.verifierJustificatif()));
         }
         var type=TypeFactureRapprochement.valueOf(retenu.typePiece());
+        boolean parRole = demande.perimetre()!=null && Boolean.TRUE.equals(demande.perimetre().consultation())
+                && List.of(Etape.SALAIRES, Etape.CLIENTS, Etape.FOURNISSEURS).contains(demande.etape());
         if (type==TypeFactureRapprochement.ACHAT) {
-            Long id=paiementsAchats.preparer(c,choix.operationId(),retenu.pieceId(),choix.montant(),100,"ASSISTANT-OP-"+choix.operationId()+"-"+type+"-"+retenu.pieceId(),"ASSISTANT");
+            String mode = !parRole ? "ASSISTANT" : retenu.cle().startsWith("P:REMBOURSEMENT:")
+                    ? PaiementAchatRapprochementService.ROLE_REMBOURSEMENT : PaiementAchatRapprochementService.ROLE_ACHAT;
+            Long id=paiementsAchats.preparer(c,choix.operationId(),retenu.pieceId(),choix.montant(),100,"ASSISTANT-OP-"+choix.operationId()+"-"+type+"-"+retenu.pieceId(),mode);
             paiementsAchats.valider(c,id);return id;
         }
-        return confirmerDocumentAssistant(c,choix.operationId(),retenu.pieceId(),retenu.numeroPiece(),type,choix.montant());
+        return confirmerDocument(c,choix.operationId(),retenu.pieceId(),retenu.numeroPiece(),type,choix.montant(),parRole ? "ROLE_DOCUMENT" : "ASSISTANT");
     }
 
     private Long confirmerDocumentAssistant(ContexteRequete c,Long operationId,Long pieceId,String numeroPiece,TypeFactureRapprochement type,BigDecimal montant) {
@@ -896,14 +958,15 @@ public class TresorerieService {
                     && pieceId.equals(type==TypeFactureRapprochement.SALAIRE ? r.getSalaireId() : r.getFactureId())).findFirst();
             if (existante.isPresent()) {
                 if (existante.get().getMontantRapproche().compareTo(montant)!=0) throw new RegleMetierException("REPRISE_DIFFERENTE","Montant de reprise différent.");
+                if ("ROLE_DOCUMENT".equals(mode) && existante.get().getStatut()==StatutRapprochement.PROPOSE
+                        && !existante.get().isPaiementEngage()) existante.get().setModeRapprochement(mode);
                 return existante.get().getId();
             }
             verifierOperationModifiable(op);
-            if ("MANUEL".equals(mode) && (op.getStatutRapprochement() == StatutOperationBancaire.IGNOREE
+            if (("MANUEL".equals(mode) || "ROLE_DOCUMENT".equals(mode)) && (op.getStatutRapprochement() == StatutOperationBancaire.IGNOREE
                     || java.util.stream.Stream.of(StatutRapprochement.PROPOSE, StatutRapprochement.VALIDE)
                         .flatMap(statut -> rapprochementRepository.findByOperationBancaireIdAndStatut(operationId, statut).stream())
-                        .anyMatch(r -> "CARTE_ENTREPRISE".equals(r.getModeRapprochement())
-                            || PaiementAchatRapprochementService.MANUEL_CARTE.equals(r.getModeRapprochement()))))
+                        .anyMatch(r -> PaiementAchatRapprochementService.carte(r.getModeRapprochement()))))
                 throw new RegleMetierException("OPERATION_NON_ELIGIBLE", "Une opération ignorée ou réservée pour une pièce carte n’est pas disponible.");
             if (montant.signum()<=0 || montant.add(rapprochementRepository.sommeMontantParOperationEtStatut(op.getId(),StatutRapprochement.VALIDE)).compareTo(montantOperation(op))>0)
                 throw new RegleMetierException("MONTANT_SUPERIEUR_OPERATION","Le montant dépasse le disponible bancaire.");
@@ -916,7 +979,19 @@ public class TresorerieService {
             return rapprochementRepository.saveAndFlush(r).getId();
         });
         if (transactionAssistant.execute(st -> trouverRapprochement(c,id).getStatut()==StatutRapprochement.VALIDE)) return id;
-        transactionAssistant.execute(st -> { trouverRapprochement(c,id).setPaiementEngage(true);return null; });
+        transactionAssistant.execute(st -> {
+            var trace = trouverRapprochement(c,id);
+            if ("ROLE_DOCUMENT".equals(trace.getModeRapprochement()) && !trace.isPaiementEngage()) {
+                var op = trace.getOperationBancaire();
+                entityManager.refresh(op,jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+                boolean salaire = trace.getTypeFacture()==TypeFactureRapprochement.SALAIRE;
+                if (op.getSens()!=(salaire ? SensOperation.DEBIT : SensOperation.CREDIT)
+                        || !tiersDeDocumentCompatible(c,op,salaire ? TypeTiersReconnu.SALARIE : TypeTiersReconnu.CLIENT,trace.getModeRapprochement()))
+                    throw new RegleMetierException("TIERS_INCOMPATIBLE","Le tiers et le sens bancaire ne correspondent pas à la pièce.");
+            }
+            trace.setPaiementEngage(true);
+            return null;
+        });
         transactionAssistant.execute(st -> { validerProposition(c,trouverRapprochement(c,id));return null; });return id;
     }
 
@@ -936,7 +1011,23 @@ public class TresorerieService {
             .filter(r -> r.getTenantId().equals(c.tenantId()) && r.getSocieteInterneId().equals(c.societeCouranteId()) && "CREATION_PIECE".equals(r.getModeRapprochement())).findFirst().orElseGet(RapprochementBancaire::new);
     }
 
+    private String famillePiece(String cle) {
+        if (cle.startsWith("P:SALAIRE:")) return "SALAIRE";
+        if (cle.startsWith("P:VENTE:")) return "VENTE";
+        return "ACHAT";
+    }
+
     private boolean traceCorrespondAuChoix(RapprochementBancaire trace, Etape etape, Choix choix) {
+        String mode = trace.getModeRapprochement();
+        if ("ROLE_DOCUMENT".equals(mode) || PaiementAchatRapprochementService.ROLE_ACHAT.equals(mode)) {
+            Long piece = trace.getTypeFacture()==TypeFactureRapprochement.SALAIRE ? trace.getSalaireId() : trace.getFactureId();
+            return etape==etapeTrace(trace) && ("P:"+trace.getTypeFacture()+":"+piece).equals(choix.candidatCle());
+        }
+        if (PaiementAchatRapprochementService.ROLE_REMBOURSEMENT.equals(mode))
+            return etape==Etape.SALAIRES && ("P:REMBOURSEMENT:"+trace.getFactureId()).equals(choix.candidatCle());
+        if (choix.candidatCle().startsWith("P:REMBOURSEMENT:")) return false;
+        if (PaiementAchatRapprochementService.ROLE_CARTE.equals(trace.getModeRapprochement()))
+            return etape==Etape.FOURNISSEURS && ("C:"+trace.getFactureId()).equals(choix.candidatCle());
         Etape etapeOrigine=etapeTrace(trace);
         if ("CREATION".equals(choix.candidatCle())) return etapeOrigine==Etape.PIECES;
         if (etapeOrigine==Etape.NOTES_FRAIS && etape!=Etape.NOTES_FRAIS) {
@@ -948,7 +1039,11 @@ public class TresorerieService {
 
     private Etape etapeTrace(RapprochementBancaire r) {
         if ("CREATION_PIECE".equals(r.getModeRapprochement()) || "PIECE_TRESORERIE".equals(r.getModeRapprochement()) || "FACTURE_RAPPROCHEMENT".equals(r.getModeRapprochement())) return Etape.PIECES;
-        if ("CARTE_ENTREPRISE".equals(r.getModeRapprochement()) || PaiementAchatRapprochementService.remboursement(r.getOperationBancaire())) return Etape.NOTES_FRAIS;
+        if (PaiementAchatRapprochementService.ROLE_REMBOURSEMENT.equals(r.getModeRapprochement())) return Etape.SALAIRES;
+        if (PaiementAchatRapprochementService.ROLE_CARTE.equals(r.getModeRapprochement())
+                || PaiementAchatRapprochementService.ROLE_ACHAT.equals(r.getModeRapprochement())) return Etape.FOURNISSEURS;
+        if ("CARTE_ENTREPRISE".equals(r.getModeRapprochement())
+                || !"ROLE_DOCUMENT".equals(r.getModeRapprochement()) && PaiementAchatRapprochementService.remboursement(r.getOperationBancaire())) return Etape.NOTES_FRAIS;
         return r.getTypeFacture()==TypeFactureRapprochement.SALAIRE ? Etape.SALAIRES : r.getTypeFacture()==TypeFactureRapprochement.VENTE ? Etape.CLIENTS : Etape.FOURNISSEURS;
     }
 
@@ -1374,7 +1469,7 @@ public class TresorerieService {
         List<FactureOuverteRapprochementDto> pieces = new ArrayList<>();
         if (operation.getSens() == SensOperation.CREDIT && roles.contains("CLIENT"))
             pieces.addAll(facturesClient.listerFacturesOuvertes(contexte, TypeFactureRapprochement.VENTE, tiersId));
-        if (operation.getSens() == SensOperation.DEBIT && roles.contains("SALARIE")) {
+        if (concerneDomaine(Etape.SALAIRES, operation, roles)) {
             pieces.addAll(facturesClient.listerFacturesOuvertes(contexte, TypeFactureRapprochement.SALAIRE, tiersId));
             for (var piece : facturesClient.listerFacturesAchatNotesFraisOuvertes(contexte, tiersId, null))
                 pieces.add(new FactureOuverteRapprochementDto(piece.id(), piece.typeFacture(), piece.tiersId(),
@@ -1382,7 +1477,9 @@ public class TresorerieService {
                         piece.libelle(), piece.nomTiers(), piece.montantTotal(), piece.statutPaiement(), "REMBOURSEMENT_BENEFICIAIRE"));
         }
         if (operation.getSens() == SensOperation.DEBIT && ClassificationOperationBancaireService.roleFournisseur(roles))
-            pieces.addAll(facturesClient.listerFacturesOuvertes(contexte, TypeFactureRapprochement.ACHAT, tiersId));
+            pieces.addAll(facturesClient.listerFacturesOuvertes(contexte, TypeFactureRapprochement.ACHAT, tiersId).stream()
+                    .filter(f -> !"DEPENSE_CARTE_ENTREPRISE".equals(f.typePiece())
+                        || roles.contains("MARCHAND") && operation.getTypeOperation()==TypeOperationBancaire.PAIEMENT_CB).toList());
         var valides = rapprochementRepository.findByOperationBancaireIdAndStatut(operation.getId(), StatutRapprochement.VALIDE);
         return pieces.stream().filter(piece -> tiersId.equals(piece.tiersId()) && piece.resteAPayer() != null
                 && piece.resteAPayer().signum() > 0 && valides.stream().noneMatch(r ->
@@ -1404,7 +1501,7 @@ public class TresorerieService {
             var trace = reprise.get();
             var ligne = lignes.get(0);
             Long pieceId = trace.getTypeFacture() == TypeFactureRapprochement.SALAIRE ? trace.getSalaireId() : trace.getFactureId();
-            if (lignes.size() != 1 || !java.util.Objects.toString(trace.getModeRapprochement(), "").startsWith("MANUEL")
+            if (lignes.size() != 1 || !(java.util.Objects.toString(trace.getModeRapprochement(), "").startsWith("MANUEL") || java.util.Objects.toString(trace.getModeRapprochement(), "").startsWith("ROLE_"))
                     || !ligne.factureId().equals(pieceId) || ligne.typeFacture() != trace.getTypeFacture()
                     || trace.getMontantRapproche().compareTo(ligne.montantRapproche()) != 0)
                 throw new RegleMetierException("REPRISE_DIFFERENTE", "Reprenez uniquement la pièce et le montant du paiement engagé.");
@@ -1432,11 +1529,11 @@ public class TresorerieService {
                 actions.add(() -> paiementsAchats.confirmerCarteManuellement(contexte, operationId, piece.id(), montant));
             } else if (ligne.typeFacture() == TypeFactureRapprochement.ACHAT) {
                 String mode = "REMBOURSEMENT_BENEFICIAIRE".equals(piece.typePiece())
-                        ? PaiementAchatRapprochementService.MANUEL_REMBOURSEMENT : PaiementAchatRapprochementService.MANUEL_FOURNISSEUR;
+                        ? PaiementAchatRapprochementService.ROLE_REMBOURSEMENT : PaiementAchatRapprochementService.ROLE_ACHAT;
                 actions.add(() -> paiementsAchats.valider(contexte, paiementsAchats.preparer(contexte, operationId, piece.id(),
                         montant, 0, libelleRapprochement(operation, String.valueOf(piece.id())), mode)));
             } else {
-                actions.add(() -> confirmerDocument(contexte, operationId, piece.id(), piece.numeroFacture(), ligne.typeFacture(), montant, "MANUEL"));
+                actions.add(() -> confirmerDocument(contexte, operationId, piece.id(), piece.numeroFacture(), ligne.typeFacture(), montant, "ROLE_DOCUMENT"));
             }
         }
         if (ajout.add(rapprochementRepository.sommeMontantParOperationEtStatut(operationId, StatutRapprochement.VALIDE))
@@ -1865,6 +1962,7 @@ public class TresorerieService {
         verifierPropositionModifiable(rapprochement, "valider");
         if (rapprochement.getTypeFacture() == TypeFactureRapprochement.SALAIRE
                 && !"MANUEL".equals(rapprochement.getModeRapprochement())
+                && !"ROLE_DOCUMENT".equals(rapprochement.getModeRapprochement())
                 && PaiementAchatRapprochementService.remboursement(rapprochement.getOperationBancaire()))
             throw new RegleMetierException("REMBOURSEMENT_NON_SALAIRE", "Un remboursement de frais ne peut pas payer un salaire.");
         Long documentId = rapprochement.getTypeFacture() == TypeFactureRapprochement.SALAIRE
@@ -2079,7 +2177,9 @@ public class TresorerieService {
     }
 
     private boolean tiersDeDocumentCompatible(ContexteRequete c, OperationBancaire op, TypeTiersReconnu domaine, String mode) {
-        if ("MANUEL".equals(mode)) return op.getTiersId() != null && tiersClient.listerTiersActifs(c).stream()
+        if ("ROLE_DOCUMENT".equals(mode) && domaine==TypeTiersReconnu.SALARIE
+                && op.getTypeOperation()!=TypeOperationBancaire.VIREMENT_EMIS) return false;
+        if ("MANUEL".equals(mode) || "ROLE_DOCUMENT".equals(mode)) return op.getTiersId() != null && tiersClient.listerTiersActifs(c).stream()
                 .anyMatch(t -> op.getTiersId().equals(t.id()) && !Boolean.FALSE.equals(t.actif())
                         && t.roles() != null && t.roles().contains(domaine.name()));
         if (op.getTypeTiersReconnu()==domaine) return true;

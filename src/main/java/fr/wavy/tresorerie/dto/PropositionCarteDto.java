@@ -16,4 +16,9 @@ public record PropositionCarteDto(
                 dateOperation, dateAchat, dateDepense, montantOperation, montantPiece, montantRapproche, ecart,
                 dateAtypique, commercantReconnu, affectationRequise, ambiguite, conflit, criteres);
     }
+    public PropositionCarteDto sansAffectation() {
+        return new PropositionCarteDto(operationId, factureId, tiersId, numeroPiece, libelleOperation, nomTiers,
+                dateOperation, dateAchat, dateDepense, montantOperation, montantPiece, montantRapproche, ecart,
+                dateAtypique, commercantReconnu, false, ambiguite, conflit, criteres);
+    }
 }

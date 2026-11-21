@@ -220,7 +220,7 @@ class PaiementAchatRapprochementIntegrationTest {
     }
     @Test void remboursementRechercheLeBeneficiaireEtBloquePieceTechnique() {
         tiersAssistant(7L, "Salarié", "SALARIE", false, null);
-        jdbc.update("update operation_bancaire set nature_operation='NOTE_DE_FRAIS',type_tiers_reconnu='SALARIE',libelle='NDF remboursement salarié' where id=?",op);
+        jdbc.update("update operation_bancaire set type_operation='VIREMENT_EMIS',nature_operation='NOTE_DE_FRAIS',type_tiers_reconnu='SALARIE',libelle='NDF remboursement salarié' where id=?",op);
         assertThat(service.listerFacturesCandidates(c,op)).extracting(FactureOuverteRapprochementDto::id).containsExactly(20L);
         assertThatThrownBy(()->service.creerPieceRapprochement(c,op)).hasMessageContaining("remboursement");
         service.rapprocherManuellement(c,op,new RapprochementManuelDemande(List.of(new LigneRapprochementManuelDemande(20L,TypeFactureRapprochement.ACHAT,new BigDecimal("100.00")))));
@@ -228,7 +228,7 @@ class PaiementAchatRapprochementIntegrationTest {
     }
     @Test void rapprochementManuelProposeToutesLesPeriodesEtConfirmeUnePaieEloignee() {
         tiersAssistant(7L, "Salarié", "SALARIE", false, null);
-        jdbc.update("update operation_bancaire set nature_operation='SALAIRE',type_tiers_reconnu='SALARIE' where id=?", op);
+        jdbc.update("update operation_bancaire set type_operation='VIREMENT_EMIS',nature_operation='SALAIRE',type_tiers_reconnu='SALARIE' where id=?", op);
         var janvier = new FactureOuverteRapprochementDto(20L, "SALAIRE", 7L, "SAL-01", LocalDate.of(2026, 1, 1),
                 null, new BigDecimal("100.00"), "Paie janvier", "Salarié");
         var novembre = new FactureOuverteRapprochementDto(21L, "SALAIRE", 7L, "SAL-11", LocalDate.of(2025, 11, 1),
@@ -245,6 +245,7 @@ class PaiementAchatRapprochementIntegrationTest {
 
     @Test void rapprochementManuelCarteIgnoreLaDateMaisConserveLaReservation() {
         tiersAssistant(7L, "Marchand", "MARCHAND", false, null);
+        jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB' where id=?", op);
         var carte = new FactureOuverteRapprochementDto(10L, "ACHAT", 7L, "CARTE-10", LocalDate.of(2020, 1, 1),
                 null, new BigDecimal("100.00"), "Autre libellé", "Marchand", new BigDecimal("100.00"),
                 "A_RAPPROCHER", "DEPENSE_CARTE_ENTREPRISE");
@@ -253,7 +254,7 @@ class PaiementAchatRapprochementIntegrationTest {
         var demande = new RapprochementManuelDemande(List.of(
                 new LigneRapprochementManuelDemande(10L, TypeFactureRapprochement.ACHAT, new BigDecimal("100.00"))));
         Long secondId = deuxiemeCarte();
-        jdbc.update("update operation_bancaire set tiers_id=7,type_tiers_reconnu='FOURNISSEUR' where id=?", secondId);
+        jdbc.update("update operation_bancaire set tiers_id=7,type_operation='PAIEMENT_CB',type_tiers_reconnu='FOURNISSEUR' where id=?", secondId);
         service.rapprocherManuellement(c, op, demande);
         assertThatThrownBy(() -> service.rapprocherManuellement(c, secondId, demande)).hasMessageContaining("réserve");
         verify(factures, times(1)).enregistrerPaiement(eq(c), eq(TypeFactureRapprochement.ACHAT), eq(10L),
@@ -279,7 +280,7 @@ class PaiementAchatRapprochementIntegrationTest {
 
     @Test void annulationPaieRejoueLeMemeRecuApresUneReponsePerduePuisPermetLeRapprochementManuel() {
         tiersAssistant(7L, "Salarié fictif", "SALARIE", false, null);
-        jdbc.update("update operation_bancaire set nature_operation='SALAIRE',type_tiers_reconnu='SALARIE' where id=?", op);
+        jdbc.update("update operation_bancaire set type_operation='VIREMENT_EMIS',nature_operation='SALAIRE',type_tiers_reconnu='SALARIE' where id=?", op);
         var janvier = new FactureOuverteRapprochementDto(31L, "SALAIRE", 7L, "PAIE-01", LocalDate.of(2026, 1, 1),
                 null, new BigDecimal("100.00"), "Salaire janvier", "Salarié fictif");
         var novembre = new FactureOuverteRapprochementDto(32L, "SALAIRE", 7L, "PAIE-11", LocalDate.of(2025, 11, 1),
@@ -341,6 +342,81 @@ class PaiementAchatRapprochementIntegrationTest {
         assertThat(trace.getStatut()).isEqualTo(StatutRapprochement.ANNULE);
         assertThat(trace.getFactureId()).isEqualTo(10L);
         assertThat(paiements.confirmerCarte(c, op, confirmation(false, false))).isNotEqualTo(rapprochement);
+    }
+
+    @Test void assistantSalariéMultirolePrésentePaieEtRemboursementEtReprendLeTypeConfirmé() {
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(new TiersTresorerieDto(7L,
+                Set.of("SALARIE","PRESTATAIRE"), "Tiers fictif", null, null, "Tiers fictif", true, false,
+                null, null, null, null, null)));
+        jdbc.update("update operation_bancaire set type_operation='VIREMENT_EMIS',nature_operation='FACTURE_FOURNISSEUR',statut_classification='CLASSEE_MANUELLE' where id=?", op);
+        var salaire = new FactureOuverteRapprochementDto(20L, "SALAIRE", 7L, "SAL-20",
+                LocalDate.of(2026,1,1),null,new BigDecimal("100.00"),"Paie","Tiers fictif");
+        when(factures.listerSalairesOuverts(c,7L,2026,1,null)).thenReturn(List.of(salaire));
+        var p = new Perimetre(null,null,null,null,null,null,null,null,true);
+        var a = service.previsualiserAssistant(c,Etape.SALAIRES,null,p);
+        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle)
+                .containsExactly("P:SALAIRE:20", "P:REMBOURSEMENT:20");
+        assertThat(a.lignes().get(0).candidats()).noneMatch(Candidat::sur);
+        var demande = new Confirmation(Etape.SALAIRES,p,null,true,List.of(choisir(a,1,false)));
+        var perdu = new AtomicBoolean(true);
+        when(factures.enregistrerPaiement(eq(c),eq(TypeFactureRapprochement.ACHAT),eq(20L),any())).thenAnswer(invocation -> {
+            if (perdu.getAndSet(false)) throw new IllegalStateException("Réponse perdue");
+            return facture(20L);
+        });
+        assertThat(service.confirmerAssistant(c,demande).aReprendre()).isEqualTo(1);
+        when(factures.listerFacturesAchatNotesFraisOuvertes(c,7L,null)).thenReturn(List.of());
+        jdbc.update("update operation_bancaire set nature_operation='SALAIRE',libelle='Virement' where id=?",op);
+        var mauvaisType = new Confirmation(Etape.SALAIRES,p,null,true,List.of(choisir(a,0,false)));
+        assertThat(service.confirmerAssistant(c,mauvaisType).reussis()).isZero();
+        verify(factures,never()).enregistrerPaiement(eq(c),eq(TypeFactureRapprochement.SALAIRE),anyLong(),any());
+        assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
+        var trace = rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE).get(0);
+        assertThat(trace.getTypePiece()).isEqualTo(TypePieceRapprochement.REMBOURSEMENT_BENEFICIAIRE);
+        verify(factures,times(2)).enregistrerPaiement(eq(c),eq(TypeFactureRapprochement.ACHAT),eq(20L),
+                argThat(d -> Boolean.TRUE.equals(d.remboursementBeneficiaire()) && trace.getId().equals(d.rapprochementId())));
+    }
+
+    @Test void assistantFournisseurNeBloquePasUneNatureSalaire() {
+        tiersAssistant(7L,"Fournisseur","PRESTATAIRE",false,null);
+        jdbc.update("update operation_bancaire set nature_operation='SALAIRE',statut_classification='CLASSEE_MANUELLE' where id=?",op);
+        var p = new Perimetre(null,null,null,null,null,null,null,null,true);
+        var a = service.previsualiserAssistant(c,Etape.FOURNISSEURS,null,p);
+        assertThat(a.lignes().get(0).bloquee()).isFalse();
+        assertThat(a.lignes().get(0).candidats()).hasSize(2);
+        assertThat(service.confirmerAssistant(c,new Confirmation(Etape.FOURNISSEURS,p,null,true,List.of(choisir(a,0,false)))).reussis()).isEqualTo(1);
+    }
+
+    @Test void assistantClientAccepteNatureManuelleIncorrecte() {
+        tiersAssistant(7L,"Client","CLIENT",false,null);
+        jdbc.update("update operation_bancaire set sens='CREDIT',debit=0,credit=100,nature_operation='AUTRE',statut_classification='CLASSEE_MANUELLE' where id=?",op);
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.VENTE,7L)).thenReturn(List.of(facture(10L)));
+        var p = new Perimetre(null,null,null,null,null,null,null,null,true);
+        var a = service.previsualiserAssistant(c,Etape.CLIENTS,null,p);
+        assertThat(a.lignes().get(0).bloquee()).isFalse();
+        assertThat(service.confirmerAssistant(c,new Confirmation(Etape.CLIENTS,p,null,true,List.of(choisir(a,0,false)))).reussis()).isEqualTo(1);
+    }
+
+    private void achatsAvecCarteOuverte() {
+        var achatCarte = new FactureOuverteRapprochementDto(10L,"ACHAT",7L,"CARTE-10",LocalDate.of(2026,1,31),null,
+                new BigDecimal("100.00"),"Carte","SSP",new BigDecimal("100.00"),"NON_PAYEE","DEPENSE_CARTE_ENTREPRISE");
+        when(factures.listerFacturesOuvertes(c,TypeFactureRapprochement.ACHAT,7L)).thenReturn(List.of(achatCarte, facture(11L)));
+    }
+
+    @Test void assistantMarchandCarteConserveLaClassificationEtLaReservation() {
+        tiersAssistant(7L,"SSP France","MARCHAND",false,null);
+        jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB',libelle='PAIEMENT SSP FRANCE 31/01',nature_operation='AUTRE',statut_classification='CLASSEE_MANUELLE' where id=?",op);
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
+        achatsAvecCarteOuverte();
+        var p = new Perimetre(null,null,null,null,null,null,null,null,true);
+        var a = service.previsualiserAssistant(c,Etape.FOURNISSEURS,null,p);
+        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("C:10","P:ACHAT:11");
+        assertThat(a.lignes().get(0).candidats().get(0).carte().affectationRequise()).isFalse();
+        assertThat(service.confirmerAssistant(c,new Confirmation(Etape.FOURNISSEURS,p,null,true,List.of(choisir(a,0,false)))).reussis()).isEqualTo(1);
+        var banque = operations.findById(op).orElseThrow();
+        assertThat(banque.getNatureOperation()).isEqualTo(NatureOperationBancaire.AUTRE);
+        assertThat(banque.getStatutClassification()).isEqualTo(StatutClassificationOperation.CLASSEE_MANUELLE);
+        assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE).get(0).getTypePiece())
+                .isEqualTo(TypePieceRapprochement.DEPENSE_CARTE_ENTREPRISE);
     }
 
     @Test void endpointGeneriqueNeContournePasLesCandidatsNiLePlafond() {
@@ -537,8 +613,8 @@ class PaiementAchatRapprochementIntegrationTest {
                 type_operation='VIREMENT_EMIS', libelle='Frais de déplacement' where id=?
                 """,op);
         var a=service.previsualiserAssistant(c,Etape.SALAIRES,"CARTE",consultation());
-        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("P:ACHAT:20");
-        verify(factures,never()).listerSalairesOuverts(any(),anyLong(),anyInt(),anyInt(),any());
+        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("P:REMBOURSEMENT:20");
+        verify(factures).listerSalairesOuverts(eq(c),eq(7L),anyInt(),anyInt(),any());
         verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
         var demande=new Confirmation(Etape.SALAIRES,consultation(),"CARTE",true,List.of(choisir(a,0,false)));
         assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
@@ -553,14 +629,15 @@ class PaiementAchatRapprochementIntegrationTest {
                 where id=?
                 """,op);
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
+        achatsAvecCarteOuverte();
         var a=service.previsualiserAssistant(c,Etape.FOURNISSEURS,"CARTE",consultation());
-        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("C:10");
+        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("C:10","P:ACHAT:11");
         verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
         var demande=new Confirmation(Etape.FOURNISSEURS,consultation(),"CARTE",true,List.of(choisir(a,0,false)));
         assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
         assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
         assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE))
-                .extracting(RapprochementBancaire::getModeRapprochement).containsExactly("CARTE_ENTREPRISE");
+                .extracting(RapprochementBancaire::getModeRapprochement).containsExactly("ROLE_CARTE");
     }
 
     @Test void clientsProposeUnePieceTresoreriePourUnEncaissementExonere() {
