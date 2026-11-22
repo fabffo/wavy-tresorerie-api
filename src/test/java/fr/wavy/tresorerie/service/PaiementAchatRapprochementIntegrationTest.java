@@ -75,6 +75,104 @@ class PaiementAchatRapprochementIntegrationTest {
         jdbc.update("update operation_bancaire set tiers_id=null,type_tiers_reconnu=null,nature_operation='SALAIRE',libelle='Paiement par carte BRIOCHE DOREE 31/01' where id=?",op);
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
     }
+    @Test void macifCreeUnePieceLocaleRejouablePuisAnnulable() throws Exception {
+        clientPieceLocale("MACIF", true, "EXONERATION");
+        var demande = new CreationPieceLocaleDemande("Facture octobre 2025", 7L, new BigDecimal("100.00"), true);
+        var pool = Executors.newFixedThreadPool(2);
+        OperationBancaireReponse creee;
+        try {
+            var premier = pool.submit(() -> service.rapprocherParDefaut(c, op, demande));
+            var second = pool.submit(() -> service.rapprocherParDefaut(c, op, demande));
+            creee = premier.get(10, TimeUnit.SECONDS);
+            assertThat(second.get(10, TimeUnit.SECONDS).pieceRapprochementId()).isEqualTo(creee.pieceRapprochementId());
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(creee.statutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+        assertThat(creee.montantRapproche()).isEqualByComparingTo("100");
+        assertThat(jdbc.queryForObject("select libelle from piece_rapprochement where id=?", String.class, creee.pieceRapprochementId()))
+                .isEqualTo("Facture octobre 2025");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, new CreationPieceLocaleDemande("Autre", 7L, new BigDecimal("100"), true)))
+                .hasMessageContaining("existe");
+        var valide = service.consulterOperation(c, op);
+        assertThat(valide.solde()).isEqualByComparingTo("0");
+        assertThat(valide.historique()).hasSize(1);
+        Long trace = valide.historique().get(0).id();
+        assertThat(valide.annulationsLocales()).containsExactly(trace);
+        assertThat(service.compterOperations(c, null).rapprochees()).isOne();
+        assertThat(service.annulerRapprochementValide(c, trace).statut()).isEqualTo(StatutRapprochement.ANNULE);
+        assertThat(service.annulerRapprochementValide(c, trace).id()).isEqualTo(trace);
+        assertThat(service.consulterOperation(c, op).solde()).isEqualByComparingTo("100");
+        assertThat(service.consulterOperation(c, op).annulationsLocales()).isEmpty();
+        assertThat(jdbc.queryForObject("select statut from piece_rapprochement where id=?", String.class, creee.pieceRapprochementId()))
+                .isEqualTo("ANNULEE");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("historique");
+        verify(factures, never()).annulerPaiement(any(), any(), anyLong(), any());
+
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.VENTE, 7L)).thenReturn(List.of(venteOuverte()));
+        service.rapprocherManuellement(c, op, new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(42L, TypeFactureRapprochement.VENTE, new BigDecimal("100")))));
+        assertThat(service.consulterOperation(c, op).historique()).hasSize(2);
+        verify(factures, never()).creerFactureAchatDepuisOperationBancaire(any(), any());
+    }
+
+    @Test void casdenRefuseLAffectationSansAutorisationOuClassification() {
+        clientPieceLocale("CASDEN", false, "EXONERATION");
+        var demande = new CreationPieceLocaleDemande("Facture octobre 2025", 7L, new BigDecimal("100"), true);
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("non autorisée");
+        clientPieceLocale("CASDEN", true, null);
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("TVA zéro");
+        assertThat(service.consulterOperation(c, op).historique()).isEmpty();
+    }
+
+    @Test void ecoleSuperieureDeLaBanqueDoitUtiliserLaPieceOuverte() {
+        clientPieceLocale("École Supérieure de la Banque", true, "EXONERATION");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.VENTE, 7L)).thenReturn(List.of(venteOuverte()));
+        var demande = new CreationPieceLocaleDemande("Facture octobre 2025", 7L, new BigDecimal("100"), true);
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("ouverte");
+        assertThat(service.listerFacturesCandidates(c, op)).hasSize(1);
+        service.rapprocherManuellement(c, op, new RapprochementManuelDemande(List.of(
+                new LigneRapprochementManuelDemande(42L, TypeFactureRapprochement.VENTE, new BigDecimal("40")))));
+        assertThat(service.consulterOperation(c, op).solde()).isEqualByComparingTo("60");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op,
+                new CreationPieceLocaleDemande("Solde", 7L, new BigDecimal("60"), true))).hasMessageContaining("facture est deja liee");
+    }
+
+    private void clientPieceLocale(String nom, boolean autorise, String regimeTva) {
+        tiersAssistant(7L, nom, "CLIENT", autorise, regimeTva);
+        jdbc.update("""
+                update operation_bancaire set sens='CREDIT', credit=100, debit=0, type_operation='VIREMENT_RECU',
+                    type_tiers_reconnu='CLIENT', nature_operation='FACTURE_CLIENT', statut_classification='CLASSEE_AUTO',
+                    tiers_reconnu=? where id=?
+                """, nom, op);
+    }
+
+    private FactureOuverteRapprochementDto venteOuverte() {
+        return new FactureOuverteRapprochementDto(42L, "VENTE", 7L, "FV-42", LocalDate.of(2026, 1, 1),
+                null, new BigDecimal("100"), "Facture", "Client");
+    }
+
+    @Test void annulationLienLocalConservePiecePreexistanteEtAutreAffectation() {
+        impotAutorise();
+        service.creerPieceRapprochement(c, op);
+        var trace = rapprochements.findByOperationBancaireIdAndStatut(op, StatutRapprochement.VALIDE).get(0);
+        Long pieceId = trace.getPieceRapprochementId();
+        jdbc.update("update piece_rapprochement set origine='MANUELLE' where id=?", pieceId);
+        jdbc.update("update rapprochement_bancaire set montant_rapproche=60 where id=?", trace.getId());
+        jdbc.update("""
+                insert into rapprochement_bancaire (tenant_id,societe_interne_id,operation_bancaire_id,piece_rapprochement_id,montant_rapproche,statut)
+                values (?,?,?,?,40,'VALIDE')
+                """, c.tenantId(), c.societeCouranteId(), op, pieceId);
+        service.annulerRapprochementValide(c, trace.getId());
+        var operation = operations.findById(op).orElseThrow();
+        assertThat(operation.getMontantRapproche()).isEqualByComparingTo("40");
+        assertThat(operation.getPieceRapprochementId()).isEqualTo(pieceId);
+        var seul = rapprochements.findByOperationBancaireIdAndStatut(op, StatutRapprochement.VALIDE).get(0);
+        service.annulerRapprochementValide(c, seul.getId());
+        assertThat(operations.findById(op).orElseThrow().getPieceRapprochementId()).isNull();
+        assertThat(jdbc.queryForObject("select statut from piece_rapprochement where id=?", String.class, pieceId)).isEqualTo("VALIDEE");
+    }
+
     @Test void previsualisationSansEcritureEtConfirmationAvecTiersExplicite() {
         sansTiers();
         var resultat=service.proposerCartes(c);

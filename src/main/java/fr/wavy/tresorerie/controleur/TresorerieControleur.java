@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import fr.wavy.tresorerie.dto.CreationPieceLocaleDemande;
 import fr.wavy.tresorerie.dto.ConfirmationCarteDemande;
 import fr.wavy.tresorerie.dto.AssistantRapprochementDto.*;
 import fr.wavy.tresorerie.dto.ConfirmationCartesDemande;
@@ -273,6 +274,12 @@ public class TresorerieControleur {
     @PostMapping({"/operations-bancaires/{id}/piece-rapprochement", "/operations-bancaires/{id}/facture-rapprochement"})
     public OperationBancaireReponse creerFactureRapprochement(HttpServletRequest request, @PathVariable Long id) {
         return tresorerieService.creerPieceRapprochement(contexte(request), id);
+    }
+
+    @PostMapping("/operations-bancaires/{id}/rapprochement-par-defaut")
+    public OperationBancaireReponse rapprocherParDefaut(HttpServletRequest request, @PathVariable Long id,
+            @Valid @RequestBody CreationPieceLocaleDemande demande) {
+        return tresorerieService.rapprocherParDefaut(contexte(request), id, demande);
     }
 
     @PostMapping("/import-releves/{id}/retraiter")

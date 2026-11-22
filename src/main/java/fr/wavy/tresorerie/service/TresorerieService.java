@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
+import fr.wavy.tresorerie.dto.CreationPieceLocaleDemande;
 import fr.wavy.tresorerie.dto.ConfirmationCarteDemande;
 import fr.wavy.tresorerie.dto.AnnulationPaiementRapprochementDto;
 import fr.wavy.tresorerie.dto.AssistantRapprochementDto.*;
@@ -98,6 +99,8 @@ import fr.wavy.tresorerie.service.importreleve.LigneReleveBancaire;
 @Service
 @Transactional
 public class TresorerieService {
+    private static final String ORIGINE_PIECE_PAR_DEFAUT = "RAPPROCHEMENT_PAR_DEFAUT";
+
     private static final int TAILLE_PAGE_OPERATIONS_DEFAUT = 25;
     private static final int TAILLE_PAGE_OPERATIONS_MAX = 200;
     private static final String MOTIF_ANNULATION_VALIDE = "Annulation du rapprochement validé";
@@ -321,10 +324,19 @@ public class TresorerieService {
     @Transactional(readOnly = true)
     public Detail consulterOperation(ContexteRequete c, Long id) {
         var operation = trouverOperationActive(c, id);
-        var historique = rapprochementRepository.findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
-                c.tenantId(), c.societeCouranteId(), id).stream().map(mapper::versReponse).toList();
-        return new Detail(mapper.versReponse(operation), historique,
-                montantOperation(operation).subtract(nulZero(operation.getMontantRapproche())));
+        var traces = rapprochementRepository.findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
+                c.tenantId(), c.societeCouranteId(), id);
+        var historiques = traces.stream().map(mapper::versReponse).toList();
+        var annulationsLocales = traces.stream().filter(r -> r.getStatut() == StatutRapprochement.VALIDE
+                && r.getPieceRapprochementId() != null && "PIECE_TRESORERIE".equals(r.getModeRapprochement()))
+                .filter(r -> pieceRapprochementRepository.findByIdAndTenantIdAndSocieteInterneId(
+                        r.getPieceRapprochementId(), c.tenantId(), c.societeCouranteId())
+                        .filter(piece -> pieceLocaleCompatible(operation, r, piece))
+                        .filter(piece -> affectationsLocalesCompatibles(operation, r, piece, autresAffectationsLocales(c, r, piece)))
+                        .isPresent())
+                .map(RapprochementBancaire::getId).toList();
+        return new Detail(mapper.versReponse(operation), historiques,
+                montantOperation(operation).subtract(nulZero(operation.getMontantRapproche())), annulationsLocales);
     }
 
     private Pageable pageableOperations(Integer page, Integer size, String sortBy, String sortDirection,
@@ -1312,7 +1324,7 @@ public class TresorerieService {
 
         TypePieceRapprochement typePiece = determinerTypePiece(operation);
         if (typePiece != TypePieceRapprochement.FACTURE_ACHAT) {
-            return creerPieceTresorerie(contexte, operation, tiers, typePiece);
+            return creerPieceTresorerie(contexte, operation, tiers, typePiece, operation.getLibelle(), "AUTOMATIQUE");
         }
 
         BigDecimal montant = montantOperation(operation);
@@ -1383,8 +1395,78 @@ public class TresorerieService {
         return creerPieceRapprochement(contexte, id);
     }
 
+    public OperationBancaireReponse rapprocherParDefaut(ContexteRequete c, Long id, CreationPieceLocaleDemande demande) {
+        if (demande == null || !Boolean.TRUE.equals(demande.confirmation()) || demande.libelle() == null
+                || demande.libelle().isBlank() || demande.libelle().length() > 500 || demande.tiersId() == null
+                || demande.montantDisponible() == null || demande.montantDisponible().signum() <= 0) {
+            throw new RegleMetierException("CONFIRMATION_PIECE_REQUISE", "Renseignez le libellé et confirmez le tiers et le montant.");
+        }
+        var operation = trouverOperationActive(c, id);
+        entityManager.refresh(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+        if (!demande.tiersId().equals(operation.getTiersId()))
+            throw new RegleMetierException("TIERS_OPERATION_MODIFIE", "Le tiers de l’opération a changé. Actualisez la liste.");
+        String libelle = demande.libelle().strip();
+        var traces = rapprochementRepository.findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
+                c.tenantId(), c.societeCouranteId(), id);
+        var pieceExistante = pieceRapprochementRepository.findByOperationBancaireIdAndTenantIdAndSocieteInterneId(
+                id, c.tenantId(), c.societeCouranteId());
+        if (pieceExistante.isPresent()) {
+            var piece = pieceExistante.get();
+            if (ORIGINE_PIECE_PAR_DEFAUT.equals(piece.getOrigine()) && "VALIDEE".equals(piece.getStatut())
+                    && demande.tiersId().equals(piece.getTiersId()) && libelle.equals(piece.getLibelle())
+                    && demande.montantDisponible().compareTo(piece.getMontantTtc()) == 0
+                    && piece.getId().equals(operation.getPieceRapprochementId())
+                    && traces.stream().anyMatch(r -> r.getStatut() == StatutRapprochement.VALIDE
+                            && piece.getId().equals(r.getPieceRapprochementId()))) {
+                // La formule du solde doit être relue après l’attente éventuelle du verrou.
+                entityManager.refresh(operation);
+                return mapper.versReponse(operation, true);
+            }
+            throw new RegleMetierException("PIECE_RAPPROCHEMENT_DEJA_CREEE", "Une pièce locale existe dans l’historique de cette opération.");
+        }
+
+        verifierOperationEligiblePieceRapprochement(operation);
+        BigDecimal montant = montantOperation(operation);
+        if (montant.compareTo(demande.montantDisponible()) != 0 || nulZero(operation.getMontantRapproche()).signum() != 0
+                || traces.stream().anyMatch(r -> r.getStatut() != StatutRapprochement.ANNULE)
+                || operation.getPieceRapprochementId() != null || operation.getSalaireId() != null) {
+            throw new RegleMetierException("DISPONIBLE_BANCAIRE_MODIFIE", "Le disponible a changé ou un rapprochement est réservé. Actualisez la liste.");
+        }
+        var tiers = tiersClient.listerTiersActifs(c).stream()
+                .filter(t -> demande.tiersId().equals(t.id()) && Boolean.TRUE.equals(t.actif())).findFirst().orElse(null);
+        if (tiers == null)
+            throw new RegleMetierException("TIERS_ACTIF_REQUIS", "Le tiers de l’opération doit être actif.");
+        if (!Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()))
+            throw new RegleMetierException("CREATION_PIECE_NON_AUTORISEE", "Création non autorisée dans la fiche Tiers.");
+        var raisons = raisonsPieceAutomatique(c, operation, tiers, traces, new HashMap<>());
+        if (!raisons.isEmpty())
+            throw new RegleMetierException("CREATION_PIECE_LOCALE_REFUSEE", String.join(" · ", raisons));
+        var nature = operation.getNatureOperation();
+        if (operation.getSens() == null
+                || (operation.getSens() == SensOperation.DEBIT ? nulZero(operation.getDebit()) : nulZero(operation.getCredit())).compareTo(montant) != 0
+                || (operation.getSens() == SensOperation.DEBIT ? nulZero(operation.getCredit()) : nulZero(operation.getDebit())).signum() != 0
+                || (nature == NatureOperationBancaire.FACTURE_CLIENT && operation.getSens() != SensOperation.CREDIT)
+                || (nature == NatureOperationBancaire.FACTURE_FOURNISSEUR && operation.getSens() != SensOperation.DEBIT)
+                || (List.of(NatureOperationBancaire.IMPOT, NatureOperationBancaire.TVA, NatureOperationBancaire.URSSAF,
+                        NatureOperationBancaire.FRAIS_BANCAIRES).contains(nature) && operation.getSens() != SensOperation.DEBIT)
+                || (nature == NatureOperationBancaire.APPORT_CAPITAL && operation.getSens() != SensOperation.CREDIT)
+                || nature == NatureOperationBancaire.SALAIRE || nature == NatureOperationBancaire.NOTE_DE_FRAIS
+                || PaiementAchatRapprochementService.remboursement(operation)
+                || operation.getTypeOperation() == TypeOperationBancaire.PAIEMENT_CB) {
+            throw new RegleMetierException("PIECE_LOCALE_NON_COMPATIBLE", "Le sens ou la nature de l’opération impose l’utilisation d’une pièce existante ou une vérification comptable.");
+        }
+        if (!piecesManuelles(c, operation).isEmpty())
+            throw new RegleMetierException("PIECE_OUVERTE_EXISTANTE", "Une pièce compatible est ouverte. Utilisez le rapprochement manuel.");
+
+        var type = determinerTypePiece(operation);
+        if (type == TypePieceRapprochement.FACTURE_ACHAT || type == TypePieceRapprochement.FACTURE_VENTE)
+            type = TypePieceRapprochement.PIECE_TRESORERIE;
+        return creerPieceTresorerie(c, operation, tiers, type, libelle, ORIGINE_PIECE_PAR_DEFAUT);
+    }
+
     private OperationBancaireReponse creerPieceTresorerie(
-            ContexteRequete contexte, OperationBancaire operation, TiersTresorerieDto tiers, TypePieceRapprochement typePiece
+            ContexteRequete contexte, OperationBancaire operation, TiersTresorerieDto tiers, TypePieceRapprochement typePiece,
+            String libellePiece, String origine
     ) {
         if (pieceRapprochementRepository.existsByOperationBancaireId(operation.getId())) {
             throw new RegleMetierException("PIECE_RAPPROCHEMENT_DEJA_CREEE", "Une piece de rapprochement existe deja pour cette operation.");
@@ -1405,7 +1487,8 @@ public class TresorerieService {
         PieceRapprochement piece = new PieceRapprochement();
         piece.setTenantId(contexte.tenantId()); piece.setSocieteInterneId(contexte.societeCouranteId());
         piece.setOperationBancaireId(operation.getId()); piece.setTiersId(tiers.id()); piece.setTypePiece(typePiece);
-        piece.setNumeroPiece(numeroPiece); piece.setDatePiece(operation.getDateOperation()); piece.setLibelle(operation.getLibelle());
+        piece.setNumeroPiece(numeroPiece); piece.setDatePiece(operation.getDateOperation()); piece.setLibelle(libellePiece);
+        piece.setOrigine(origine);
         piece.setMontantHt(montant); piece.setMontantTva(BigDecimal.ZERO); piece.setMontantTtc(montant);
         piece.setLibelleRapprochement(libelle);
         pieceRapprochementRepository.save(piece);
@@ -1419,12 +1502,16 @@ public class TresorerieService {
         rapprochement.setTenantId(contexte.tenantId()); rapprochement.setSocieteInterneId(contexte.societeCouranteId());
         rapprochement.setOperationBancaire(operation); rapprochement.setPieceRapprochementId(piece.getId());
         rapprochement.setTypePiece(typePiece); rapprochement.setDocumentAssocieNumero(numeroPiece);
-        rapprochement.setDocumentAssocieLibelle(operation.getLibelle());
+        rapprochement.setDocumentAssocieLibelle(libellePiece);
         rapprochement.setMontantRapproche(montant); rapprochement.setEcart(BigDecimal.ZERO);
         rapprochement.setStatut(StatutRapprochement.VALIDE); rapprochement.setModeRapprochement("PIECE_TRESORERIE");
         rapprochement.setLibelleRapprochement(libelle); rapprochement.setDateRapprochement(maintenant);
         rapprochement.setDateValidation(maintenant); rapprochement.setUtilisateurId(contexte.utilisateurId());
         rapprochement.setUtilisateurValidationId(contexte.utilisateurId()); rapprochementRepository.save(rapprochement);
+        if (ORIGINE_PIECE_PAR_DEFAUT.equals(origine)) {
+            entityManager.flush();
+            entityManager.refresh(operation);
+        }
         return mapper.versReponse(operation, true);
     }
 
@@ -1645,20 +1732,24 @@ public class TresorerieService {
         if (rapprochement.getStatut() != StatutRapprochement.VALIDE)
             throw new RegleMetierException("RAPPROCHEMENT_STATUT_INVALIDE", "Seul un rapprochement validé peut être annulé par cette action.");
 
-        var type = rapprochement.getTypeFacture();
-        Long pieceId = type == TypeFactureRapprochement.SALAIRE ? rapprochement.getSalaireId() : rapprochement.getFactureId();
-        String reference = rapprochement.getLibelleRapprochement();
-        if (type == null || pieceId == null
-                || rapprochement.getPieceRapprochementId() != null
-                || (type == TypeFactureRapprochement.ACHAT && pieceId.equals(operation.getFactureRapprochementId()))
-                || reference == null || reference.isBlank()) {
-            throw new RegleMetierException("PAIEMENT_ORIGINE_NON_IDENTIFIE", "Le paiement d’origine n’a pas pu être identifié avec certitude.");
-        }
+        if (rapprochement.getPieceRapprochementId() != null) {
+            annulerAffectationPieceLocale(contexte, operation, rapprochement);
+        } else {
+            var type = rapprochement.getTypeFacture();
+            Long pieceId = type == TypeFactureRapprochement.SALAIRE ? rapprochement.getSalaireId() : rapprochement.getFactureId();
+            String reference = rapprochement.getLibelleRapprochement();
+            if (type == null || pieceId == null
+                    || (type == TypeFactureRapprochement.ACHAT && pieceId.equals(operation.getFactureRapprochementId()))
+                    || reference == null || reference.isBlank()) {
+                throw new RegleMetierException("PAIEMENT_ORIGINE_NON_IDENTIFIE", "Le paiement d’origine n’a pas pu être identifié avec certitude.");
+            }
 
-        // Le lien garde sa réservation tant que Factures n'a pas confirmé. Une reprise
-        // après interruption renvoie exactement le même reçu, déjà annulé le cas échéant.
-        facturesClient.annulerPaiement(contexte, type, pieceId, new AnnulationPaiementRapprochementDto(
-                id, operation.getId(), rapprochement.getMontantRapproche(), reference));
+            // Le lien garde sa réservation tant que Factures n'a pas confirmé. Une reprise
+            // après interruption renvoie exactement le même reçu, déjà annulé le cas échéant.
+            facturesClient.annulerPaiement(contexte, type, pieceId, new AnnulationPaiementRapprochementDto(
+                    id, operation.getId(), rapprochement.getMontantRapproche(), reference));
+
+        }
 
         var maintenant = LocalDateTime.now();
         rapprochement.setStatut(StatutRapprochement.ANNULE);
@@ -1675,6 +1766,8 @@ public class TresorerieService {
         operation.setRapprochee(complet);
         operation.setStatutRapprochement(complet ? StatutOperationBancaire.RAPPROCHEE
                 : total.signum() > 0 ? StatutOperationBancaire.PARTIELLEMENT_RAPPROCHEE : StatutOperationBancaire.NON_RAPPROCHEE);
+        operation.setPieceRapprochementId(restants.stream().filter(r -> r.getPieceRapprochementId() != null)
+                .max(Comparator.comparing(RapprochementBancaire::getId)).map(RapprochementBancaire::getPieceRapprochementId).orElse(null));
         operation.setFactureId(dernier == null ? null : dernier.getFactureId());
         operation.setSalaireId(dernier == null ? null : dernier.getSalaireId());
         operation.setTypeFacture(dernier == null ? null : dernier.getTypeFacture());
@@ -1683,6 +1776,56 @@ public class TresorerieService {
                 : dernier.getDateValidation() == null ? dernier.getDateRapprochement() : dernier.getDateValidation());
         operation.setDateModification(maintenant);
         return mapper.versReponse(rapprochement);
+    }
+
+    private void annulerAffectationPieceLocale(ContexteRequete contexte, OperationBancaire operation,
+            RapprochementBancaire rapprochement) {
+        var piece = pieceRapprochementRepository.findByIdAndTenantIdAndSocieteInterneId(
+                rapprochement.getPieceRapprochementId(), contexte.tenantId(), contexte.societeCouranteId())
+                .orElseThrow(this::pieceLocaleIncoherente);
+        entityManager.refresh(piece, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+        if (!pieceLocaleCompatible(operation, rapprochement, piece)) throw pieceLocaleIncoherente();
+
+        var autres = autresAffectationsLocales(contexte, rapprochement, piece);
+        if (!affectationsLocalesCompatibles(operation, rapprochement, piece, autres)) throw pieceLocaleIncoherente();
+
+        boolean origineExclusive = ("AUTOMATIQUE".equals(piece.getOrigine()) || ORIGINE_PIECE_PAR_DEFAUT.equals(piece.getOrigine()))
+                && "PIECE_TRESORERIE".equals(rapprochement.getModeRapprochement())
+                && rapprochement.getMontantRapproche().compareTo(piece.getMontantTtc()) == 0
+                && piece.getNumeroPiece().equals(rapprochement.getDocumentAssocieNumero())
+                && piece.getLibelleRapprochement().equals(rapprochement.getLibelleRapprochement());
+        if (origineExclusive && autres.isEmpty()) piece.annuler();
+    }
+
+    private List<RapprochementBancaire> autresAffectationsLocales(
+            ContexteRequete c, RapprochementBancaire rapprochement, PieceRapprochement piece) {
+        return rapprochementRepository.findByTenantIdAndSocieteInterneIdAndPieceRapprochementId(
+                c.tenantId(), c.societeCouranteId(), piece.getId()).stream()
+                .filter(r -> !rapprochement.getId().equals(r.getId()) && r.getStatut() != StatutRapprochement.ANNULE).toList();
+    }
+
+    private boolean affectationsLocalesCompatibles(OperationBancaire operation, RapprochementBancaire rapprochement,
+            PieceRapprochement piece, List<RapprochementBancaire> autres) {
+        BigDecimal total = autres.stream().filter(r -> r.getStatut() == StatutRapprochement.VALIDE)
+                .map(RapprochementBancaire::getMontantRapproche)
+                .reduce(rapprochement.getMontantRapproche(), BigDecimal::add);
+        return total.compareTo(piece.getMontantTtc()) <= 0
+                && autres.stream().allMatch(r -> operation.getId().equals(r.getOperationBancaire().getId()));
+    }
+
+    private boolean pieceLocaleCompatible(OperationBancaire operation, RapprochementBancaire rapprochement, PieceRapprochement piece) {
+        return operation.getId().equals(piece.getOperationBancaireId()) && "VALIDEE".equals(piece.getStatut())
+                && java.util.Objects.equals(operation.getTiersId(), piece.getTiersId())
+                && !"MIGRATION_FACTURE_TECHNIQUE".equals(piece.getOrigine())
+                && !"MIGRATION_PIECE_TRESORERIE".equals(rapprochement.getModeRapprochement())
+                && rapprochement.getTypeFacture() == null && rapprochement.getFactureId() == null && rapprochement.getSalaireId() == null
+                && rapprochement.getMontantRapproche().signum() > 0
+                && rapprochement.getMontantRapproche().compareTo(piece.getMontantTtc()) <= 0;
+    }
+
+    private RegleMetierException pieceLocaleIncoherente() {
+        return new RegleMetierException("PIECE_LOCALE_NON_ANNULABLE",
+                "L’affectation de cette pièce locale ne peut pas être annulée avec certitude.");
     }
 
     public RapprochementPropositionsResultat validerRapprochementsProposes(ContexteRequete contexte) {

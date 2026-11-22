@@ -32,7 +32,7 @@ public final class AssistantRapprochementDto {
             this(total, rapprochees, partielles, tiersIdentifies, nonRapprochees, sansTiers, List.of());
         }
     }
-    public record Detail(OperationBancaireReponse operation, List<RapprochementBancaireReponse> historique, BigDecimal solde) {}
+    public record Detail(OperationBancaireReponse operation, List<RapprochementBancaireReponse> historique, BigDecimal solde, List<Long> annulationsLocales) {}
     public record Candidat(String cle, Long tiersId, String nomTiers, TypeTiersReconnu typeTiers,
             Long pieceId, String numeroPiece, String typePiece, BigDecimal montantDisponible,
             BigDecimal montantPropose, LocalDate datePiece, LocalDate dateEcheance, boolean sur,

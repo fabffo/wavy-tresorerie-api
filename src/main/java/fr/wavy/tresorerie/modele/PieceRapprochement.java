@@ -32,6 +32,9 @@ public class PieceRapprochement {
     public TypePieceRapprochement getTypePiece() { return typePiece; } public String getNumeroPiece() { return numeroPiece; }
     public LocalDate getDatePiece() { return datePiece; } public String getLibelle() { return libelle; }
     public BigDecimal getMontantTtc() { return montantTtc; } public String getStatut() { return statut; }
+    public String getOrigine() { return origine; }
+    public void annuler() { statut = "ANNULEE"; }
+    public void setOrigine(String origine) { this.origine = origine; }
     public String getLibelleRapprochement() { return libelleRapprochement; }
     public void setTenantId(Long v) { tenantId=v; } public void setSocieteInterneId(Long v) { societeInterneId=v; }
     public void setOperationBancaireId(Long v) { operationBancaireId=v; } public void setTiersId(Long v) { tiersId=v; }
