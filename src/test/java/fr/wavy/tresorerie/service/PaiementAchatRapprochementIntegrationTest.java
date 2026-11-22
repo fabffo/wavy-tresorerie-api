@@ -76,8 +76,9 @@ class PaiementAchatRapprochementIntegrationTest {
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
     }
     @Test void macifCreeUnePieceLocaleRejouablePuisAnnulable() throws Exception {
-        clientPieceLocale("MACIF", true, "EXONERATION");
-        var demande = new CreationPieceLocaleDemande("Facture octobre 2025", 7L, new BigDecimal("100.00"), true);
+        clientPieceLocale("MACIF", false, "EXONERATION");
+        jdbc.update("update operation_bancaire set date_operation='2026-01-26', credit=6480, montant=6480 where id=?", op);
+        var demande = new CreationPieceLocaleDemande("Facture octobre 2025", 7L, new BigDecimal("6480.00"), true);
         var pool = Executors.newFixedThreadPool(2);
         OperationBancaireReponse creee;
         try {
@@ -88,11 +89,12 @@ class PaiementAchatRapprochementIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+        assertThat(creee.pieceRapprochementAutorisee()).isFalse();
         assertThat(creee.statutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
-        assertThat(creee.montantRapproche()).isEqualByComparingTo("100");
+        assertThat(creee.montantRapproche()).isEqualByComparingTo("6480");
         assertThat(jdbc.queryForObject("select libelle from piece_rapprochement where id=?", String.class, creee.pieceRapprochementId()))
                 .isEqualTo("Facture octobre 2025");
-        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, new CreationPieceLocaleDemande("Autre", 7L, new BigDecimal("100"), true)))
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, new CreationPieceLocaleDemande("Autre", 7L, new BigDecimal("6480"), true)))
                 .hasMessageContaining("existe");
         var valide = service.consulterOperation(c, op);
         assertThat(valide.solde()).isEqualByComparingTo("0");
@@ -102,7 +104,7 @@ class PaiementAchatRapprochementIntegrationTest {
         assertThat(service.compterOperations(c, null).rapprochees()).isOne();
         assertThat(service.annulerRapprochementValide(c, trace).statut()).isEqualTo(StatutRapprochement.ANNULE);
         assertThat(service.annulerRapprochementValide(c, trace).id()).isEqualTo(trace);
-        assertThat(service.consulterOperation(c, op).solde()).isEqualByComparingTo("100");
+        assertThat(service.consulterOperation(c, op).solde()).isEqualByComparingTo("6480");
         assertThat(service.consulterOperation(c, op).annulationsLocales()).isEmpty();
         assertThat(jdbc.queryForObject("select statut from piece_rapprochement where id=?", String.class, creee.pieceRapprochementId()))
                 .isEqualTo("ANNULEE");
@@ -116,12 +118,28 @@ class PaiementAchatRapprochementIntegrationTest {
         verify(factures, never()).creerFactureAchatDepuisOperationBancaire(any(), any());
     }
 
-    @Test void casdenRefuseLAffectationSansAutorisationOuClassification() {
+    @Test void rapprochementParDefautAvecAutorisationAutomatiqueEtConfirmationRequise() {
+        clientPieceLocale("CASDEN", true, "EXONERATION");
+        var montant = new BigDecimal("100");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, new CreationPieceLocaleDemande(" ", 7L, montant, true)))
+                .hasMessageContaining("libellé");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, new CreationPieceLocaleDemande("Facture octobre 2025", 7L, montant, false)))
+                .hasMessageContaining("confirmez");
+        assertThat(service.consulterOperation(c, op).historique()).isEmpty();
+        assertThat(service.rapprocherParDefaut(c, op, new CreationPieceLocaleDemande("Facture octobre 2025", 7L, montant, true))
+                .statutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+    }
+
+    @Test void refusAutomatiqueEtControleFiscalRestentActifs() {
         clientPieceLocale("CASDEN", false, "EXONERATION");
-        var demande = new CreationPieceLocaleDemande("Facture octobre 2025", 7L, new BigDecimal("100"), true);
-        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("non autorisée");
-        clientPieceLocale("CASDEN", true, null);
-        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("TVA zéro");
+        assertThatThrownBy(() -> service.creerPieceRapprochement(c, op))
+                .isInstanceOf(fr.wavy.tresorerie.exception.CreationPieceInterditeException.class);
+        var apercu = service.previsualiserAssistant(c, Etape.PIECES, null, null);
+        assertThat(apercu.lignes()).allSatisfy(ligne -> assertThat(ligne.candidats()).isEmpty());
+        clientPieceLocale("CASDEN", false, null);
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op,
+                new CreationPieceLocaleDemande("Facture octobre 2025", 7L, new BigDecimal("100"), true)))
+                .hasMessageContaining("TVA zéro").hasMessageNotContaining("fiche Tiers");
         assertThat(service.consulterOperation(c, op).historique()).isEmpty();
     }
 

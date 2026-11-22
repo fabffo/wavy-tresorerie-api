@@ -1132,9 +1132,16 @@ public class TresorerieService {
 
     private List<String> raisonsPieceAutomatique(ContexteRequete c,OperationBancaire o,TiersTresorerieDto t,
             List<RapprochementBancaire> traces,Map<String,List<FactureOuverteRapprochementDto>> cache) {
-        var raisons=new ArrayList<String>();
-        if (t==null) return List.of("Tiers actif à identifier à l'étape 1");
+        if (t == null) return List.of("Tiers actif à identifier à l'étape 1");
+        var raisons = new ArrayList<String>();
         if (!Boolean.TRUE.equals(t.pieceRapprochementAutorisee())) raisons.add("Création non autorisée dans la fiche Tiers");
+        raisons.addAll(raisonsPieceLocale(c, o, t, traces, cache));
+        return List.copyOf(raisons);
+    }
+
+    private List<String> raisonsPieceLocale(ContexteRequete c, OperationBancaire o, TiersTresorerieDto t,
+            List<RapprochementBancaire> traces, Map<String, List<FactureOuverteRapprochementDto>> cache) {
+        var raisons = new ArrayList<String>();
         if (o.isRapprochee() || o.getStatutRapprochement()!=StatutOperationBancaire.NON_RAPPROCHEE) raisons.add("Opération déjà rapprochée ou partiellement rapprochée");
         if (!"EUR".equals(o.getCompteBancaire().getDevise())) raisons.add("Devise incompatible avec les pièces générées en EUR");
         if (!List.of(StatutClassificationOperation.CLASSEE_AUTO,StatutClassificationOperation.CLASSEE_MANUELLE).contains(o.getStatutClassification()) || o.getNatureOperation()==NatureOperationBancaire.AUTRE) raisons.add("Nature bancaire ambiguë");
@@ -1405,6 +1412,10 @@ public class TresorerieService {
         entityManager.refresh(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
         if (!demande.tiersId().equals(operation.getTiersId()))
             throw new RegleMetierException("TIERS_OPERATION_MODIFIE", "Le tiers de l’opération a changé. Actualisez la liste.");
+        var tiers = tiersClient.listerTiersActifs(c).stream()
+                .filter(t -> demande.tiersId().equals(t.id()) && Boolean.TRUE.equals(t.actif())).findFirst().orElse(null);
+        if (tiers == null)
+            throw new RegleMetierException("TIERS_ACTIF_REQUIS", "Le tiers de l’opération doit être actif.");
         String libelle = demande.libelle().strip();
         var traces = rapprochementRepository.findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
                 c.tenantId(), c.societeCouranteId(), id);
@@ -1420,7 +1431,7 @@ public class TresorerieService {
                             && piece.getId().equals(r.getPieceRapprochementId()))) {
                 // La formule du solde doit être relue après l’attente éventuelle du verrou.
                 entityManager.refresh(operation);
-                return mapper.versReponse(operation, true);
+                return mapper.versReponse(operation, Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()));
             }
             throw new RegleMetierException("PIECE_RAPPROCHEMENT_DEJA_CREEE", "Une pièce locale existe dans l’historique de cette opération.");
         }
@@ -1432,13 +1443,7 @@ public class TresorerieService {
                 || operation.getPieceRapprochementId() != null || operation.getSalaireId() != null) {
             throw new RegleMetierException("DISPONIBLE_BANCAIRE_MODIFIE", "Le disponible a changé ou un rapprochement est réservé. Actualisez la liste.");
         }
-        var tiers = tiersClient.listerTiersActifs(c).stream()
-                .filter(t -> demande.tiersId().equals(t.id()) && Boolean.TRUE.equals(t.actif())).findFirst().orElse(null);
-        if (tiers == null)
-            throw new RegleMetierException("TIERS_ACTIF_REQUIS", "Le tiers de l’opération doit être actif.");
-        if (!Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()))
-            throw new RegleMetierException("CREATION_PIECE_NON_AUTORISEE", "Création non autorisée dans la fiche Tiers.");
-        var raisons = raisonsPieceAutomatique(c, operation, tiers, traces, new HashMap<>());
+        var raisons = raisonsPieceLocale(c, operation, tiers, traces, new HashMap<>());
         if (!raisons.isEmpty())
             throw new RegleMetierException("CREATION_PIECE_LOCALE_REFUSEE", String.join(" · ", raisons));
         var nature = operation.getNatureOperation();
@@ -1512,7 +1517,7 @@ public class TresorerieService {
             entityManager.flush();
             entityManager.refresh(operation);
         }
-        return mapper.versReponse(operation, true);
+        return mapper.versReponse(operation, Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()));
     }
 
     private TypePieceRapprochement determinerTypePiece(OperationBancaire operation) {
