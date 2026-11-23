@@ -60,6 +60,8 @@ public class RapprochementBancaire {
     @Column(nullable = false, length = 40)
     private StatutRapprochement statut = StatutRapprochement.PROPOSE;
     private String commentaire;
+    @Column(name = "exercice_reference")
+    private Integer exerciceReference;
     @Column(name = "mode_rapprochement", length = 60)
     private String modeRapprochement;
     @Column(name = "libelle_rapprochement", length = 180)
@@ -111,6 +113,8 @@ public class RapprochementBancaire {
     public void setEcart(BigDecimal ecart) { this.ecart = ecart; }
     public StatutRapprochement getStatut() { return statut; }
     public void setStatut(StatutRapprochement statut) { this.statut = statut; }
+    public Integer getExerciceReference() { return exerciceReference; }
+    public void setExerciceReference(Integer exerciceReference) { this.exerciceReference = exerciceReference; }
     public String getCommentaire() { return commentaire; }
     public void setCommentaire(String commentaire) { this.commentaire = commentaire; }
     public String getModeRapprochement() { return modeRapprochement; }

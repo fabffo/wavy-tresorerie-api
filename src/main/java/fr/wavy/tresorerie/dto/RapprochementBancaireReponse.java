@@ -29,6 +29,7 @@ public record RapprochementBancaireReponse(
         String libelleRapprochement,
         Integer scoreMatching,
         String commentaire,
+        Integer exerciceReference,
         LocalDateTime dateRapprochement,
         Long utilisateurId,
         LocalDateTime dateProposition,

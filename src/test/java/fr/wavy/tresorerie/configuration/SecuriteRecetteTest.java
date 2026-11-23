@@ -101,6 +101,19 @@ class SecuriteRecetteTest {
     }
 
     @Test
+    void suiviExerciceExigeUneSessionEtUneSocieteAutorisee() throws Exception {
+        var requete = org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                "/api/tresorerie/operations-bancaires/1/rapprochement-exercice-anterieur")
+                .header("X-Tenant-Id", 3).header("X-Utilisateur-Id", 7).header("X-Societe-Courante-Id", 12)
+                .contentType("application/json").content("""
+                        {"motif":"Facture octobre 2025","tiersId":7,"montantDisponible":6480,"exerciceReference":2025,"confirmation":true}
+                        """);
+        mockMvc.perform(requete).andExpect(status().isUnauthorized());
+        mockMvc.perform(requete.header("Authorization", "Bearer jeton-test")).andExpect(status().isForbidden());
+        org.mockito.Mockito.verify(tresorerieService, org.mockito.Mockito.never()).rapprocherExerciceAnterieur(any(), any(), any());
+    }
+
+    @Test
     void headersForgesSeulsSontRefuses() throws Exception {
         mockMvc.perform(requeteMetier(3, 7, 11)).andExpect(status().isUnauthorized());
     }

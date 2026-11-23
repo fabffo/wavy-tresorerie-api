@@ -43,6 +43,7 @@ import fr.wavy.tresorerie.dto.ImportReleveResultatDto;
 import fr.wavy.tresorerie.dto.OperationBancaireDemande;
 import fr.wavy.tresorerie.dto.OperationBancaireReponse;
 import fr.wavy.tresorerie.dto.PieceRapprochementReponse;
+import fr.wavy.tresorerie.dto.RapprochementExerciceAnterieurDemande;
 import fr.wavy.tresorerie.dto.RapprochementBancaireDemande;
 import fr.wavy.tresorerie.dto.RapprochementBancaireReponse;
 import fr.wavy.tresorerie.dto.RapprochementFacturesResultat;
@@ -280,6 +281,12 @@ public class TresorerieControleur {
     public OperationBancaireReponse rapprocherParDefaut(HttpServletRequest request, @PathVariable Long id,
             @Valid @RequestBody CreationPieceLocaleDemande demande) {
         return tresorerieService.rapprocherParDefaut(contexte(request), id, demande);
+    }
+
+    @PostMapping("/operations-bancaires/{id}/rapprochement-exercice-anterieur")
+    public RapprochementBancaireReponse rapprocherExerciceAnterieur(HttpServletRequest request, @PathVariable Long id,
+            @Valid @RequestBody RapprochementExerciceAnterieurDemande demande) {
+        return tresorerieService.rapprocherExerciceAnterieur(contexte(request), id, demande);
     }
 
     @PostMapping("/import-releves/{id}/retraiter")

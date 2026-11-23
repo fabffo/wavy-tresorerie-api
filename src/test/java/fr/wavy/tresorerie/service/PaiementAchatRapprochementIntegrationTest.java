@@ -75,6 +75,110 @@ class PaiementAchatRapprochementIntegrationTest {
         jdbc.update("update operation_bancaire set tiers_id=null,type_tiers_reconnu=null,nature_operation='SALAIRE',libelle='Paiement par carte BRIOCHE DOREE 31/01' where id=?",op);
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
     }
+    @Test void macifSuiviSurExerciceAnterieurSansDocumentPuisAnnulation() {
+        clientPieceLocale("MACIF", false, null);
+        jdbc.update("update operation_bancaire set date_operation='2026-01-26', credit=6480, montant=6480 where id=?", op);
+        var demande = new RapprochementExerciceAnterieurDemande(7L, new BigDecimal("6480"), 2025, "Facture octobre 2025", true);
+        var trace = service.rapprocherExerciceAnterieur(c, op, demande);
+        assertThat(trace.modeRapprochement()).isEqualTo("EXERCICE_ANTERIEUR");
+        assertThat(trace.statut()).isEqualTo(StatutRapprochement.VALIDE);
+        assertThat(trace.exerciceReference()).isEqualTo(2025);
+        assertThat(trace.commentaire()).isEqualTo("Facture octobre 2025");
+        assertThat(trace.utilisateurValidationId()).isEqualTo(c.utilisateurId());
+        assertThat(trace.dateValidation()).isNotNull();
+        assertThat(trace.montantRapproche()).isEqualByComparingTo("6480");
+        assertThat(service.rapprocherExerciceAnterieur(c, op, demande).id()).isEqualTo(trace.id());
+        var detail = service.consulterOperation(c, op);
+        assertThat(detail.historique()).hasSize(1);
+        assertThat(detail.operation().statutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+        assertThat(detail.operation().pieceRapprochementId()).isNull();
+        assertThat(detail.solde()).isEqualByComparingTo("0");
+        assertThat(detail.annulationsLocales()).containsExactly(trace.id());
+        assertThat(service.compterOperations(c, null).rapprochees()).isOne();
+        var annule = service.annulerRapprochementValide(c, trace.id());
+        assertThat(annule.statut()).isEqualTo(StatutRapprochement.ANNULE);
+        assertThat(annule.commentaire()).isEqualTo(trace.commentaire());
+        assertThat(service.annulerRapprochementValide(c, trace.id()).id()).isEqualTo(trace.id());
+        detail = service.consulterOperation(c, op);
+        assertThat(detail.solde()).isEqualByComparingTo("6480");
+        assertThat(detail.operation().statutRapprochement()).isEqualTo(StatutOperationBancaire.NON_RAPPROCHEE);
+        assertThat(detail.annulationsLocales()).isEmpty();
+        assertThat(service.compterOperations(c, null).rapprochees()).isZero();
+        assertThatThrownBy(() -> service.rapprocherExerciceAnterieur(c, op, demande)).hasMessageContaining("déjà été annulé");
+        verifyNoInteractions(factures);
+    }
+
+    @Test void suiviExerciceExigeUneDemandeValideEtIsoleLeContexte() {
+        clientPieceLocale("MACIF", false, null);
+        var montant = new BigDecimal("100");
+        for (int exercice : List.of(0, 2026, 2027)) {
+            assertThatThrownBy(() -> service.rapprocherExerciceAnterieur(c, op,
+                    new RapprochementExerciceAnterieurDemande(7L, montant, exercice, "Motif", true)))
+                    .hasMessageContaining("antérieur");
+        }
+        for (var demande : List.of(
+                new RapprochementExerciceAnterieurDemande(7L, montant, 2025, " ", true),
+                new RapprochementExerciceAnterieurDemande(7L, montant, 2025, "Motif", false))) {
+            assertThatThrownBy(() -> service.rapprocherExerciceAnterieur(c, op, demande)).hasMessageContaining("confirmez");
+        }
+        var demande = new RapprochementExerciceAnterieurDemande(7L, montant, 2025, "Motif", true);
+        for (var contexte : List.of(
+                new ContexteRequete(999L, c.utilisateurId(), c.societeCouranteId(), List.of("ADMIN_TENANT"), null),
+                new ContexteRequete(c.tenantId(), c.utilisateurId(), 999L, List.of("ADMIN_TENANT"), null))) {
+            assertThatThrownBy(() -> service.rapprocherExerciceAnterieur(contexte, op, demande))
+                    .isInstanceOf(fr.wavy.tresorerie.exception.RessourceNonTrouveeException.class);
+        }
+        assertThat(service.consulterOperation(c, op).historique()).isEmpty();
+        verifyNoInteractions(factures);
+    }
+
+    @Test void unSuiviExerciceEtUnePropositionOrdinaireNePeuventPasCoexister() {
+        clientPieceLocale("MACIF", false, null);
+        var montant = new BigDecimal("100");
+        var demande = new RapprochementExerciceAnterieurDemande(7L, montant, 2025, "Motif", true);
+        var proposition = new RapprochementBancaireDemande(op, 42L, TypeFactureRapprochement.VENTE, montant,
+                BigDecimal.ZERO, StatutRapprochement.PROPOSE, null);
+        var trace = service.creerRapprochement(c, proposition);
+        assertThatThrownBy(() -> service.rapprocherExerciceAnterieur(c, op, demande)).hasMessageContaining("réservation");
+        service.annulerRapprochementPropose(c, trace.id());
+        service.rapprocherExerciceAnterieur(c, op, demande);
+        assertThatThrownBy(() -> service.creerRapprochement(c, proposition)).hasMessageContaining("exercice antérieur");
+        verifyNoInteractions(factures);
+    }
+
+    @Test void suiviExerciceEtRapprochementOrdinaireSeDisputentLeMemeDisponible() throws Exception {
+        clientPieceLocale("MACIF", false, null);
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.VENTE, 7L)).thenReturn(List.of(venteOuverte()));
+        var demande = new RapprochementExerciceAnterieurDemande(7L, new BigDecimal("100"), 2025, "Motif", true);
+        var ligne = new LigneRapprochementManuelDemande(42L, TypeFactureRapprochement.VENTE, new BigDecimal("100"));
+        var depart = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var suivi = pool.submit(() -> essayerRapprochement(depart, () -> service.rapprocherExerciceAnterieur(c, op, demande)));
+            var manuel = pool.submit(() -> essayerRapprochement(depart,
+                    () -> service.rapprocherManuellement(c, op, new RapprochementManuelDemande(List.of(ligne)))));
+            depart.countDown();
+            assertThat(List.of(suivi.get(10, TimeUnit.SECONDS), manuel.get(10, TimeUnit.SECONDS)))
+                    .containsExactlyInAnyOrder(true, false);
+        } finally {
+            pool.shutdownNow();
+        }
+        var detail = service.consulterOperation(c, op);
+        assertThat(detail.historique()).hasSize(1);
+        assertThat(detail.historique().get(0).statut()).isEqualTo(StatutRapprochement.VALIDE);
+        assertThat(detail.solde()).isEqualByComparingTo("0");
+    }
+
+    private boolean essayerRapprochement(CountDownLatch depart, Runnable rapprochement) throws InterruptedException {
+        depart.await();
+        try {
+            rapprochement.run();
+            return true;
+        } catch (fr.wavy.tresorerie.exception.RegleMetierException e) {
+            return false;
+        }
+    }
+
     @Test void macifCreeUnePieceLocaleRejouablePuisAnnulable() throws Exception {
         clientPieceLocale("MACIF", false, "EXONERATION");
         jdbc.update("update operation_bancaire set date_operation='2026-01-26', credit=6480, montant=6480 where id=?", op);
@@ -386,7 +490,7 @@ class PaiementAchatRapprochementIntegrationTest {
         var montantExcessif = new RapprochementManuelDemande(List.of(
                 new LigneRapprochementManuelDemande(12L, TypeFactureRapprochement.VENTE, new BigDecimal("90.00"))));
         assertThatThrownBy(() -> service.rapprocherManuellement(c, op, montantExcessif)).hasMessageContaining("solde de la pièce");
-        var autreSociete = new ContexteRequete(c.tenantId(), c.utilisateurId(), 999L, c.roles(), null);
+        var autreSociete = new ContexteRequete(c.tenantId(), c.utilisateurId(), 999L, List.of("ADMIN_TENANT"), null);
         assertThatThrownBy(() -> service.listerFacturesCandidates(autreSociete, op)).hasMessageContaining("introuvable");
         var demande = new RapprochementManuelDemande(List.of(
                 new LigneRapprochementManuelDemande(12L, TypeFactureRapprochement.VENTE, new BigDecimal("80.00"))));

@@ -130,6 +130,7 @@ public class TresorerieMapper {
                 rapprochement.getLibelleRapprochement(),
                 rapprochement.getScoreMatching(),
                 rapprochement.getCommentaire(),
+                rapprochement.getExerciceReference(),
                 rapprochement.getDateRapprochement(),
                 rapprochement.getUtilisateurId(),
                 rapprochement.getDateProposition(),
