@@ -52,6 +52,7 @@ import fr.wavy.tresorerie.dto.FactureOuverteRapprochementDto;
 import fr.wavy.tresorerie.dto.ImportReleveDemande;
 import fr.wavy.tresorerie.dto.ImportReleveReponse;
 import fr.wavy.tresorerie.dto.MiseAJourLibelleRapprochementDemande;
+import fr.wavy.tresorerie.dto.ModificationTiersOperationDemande;
 import fr.wavy.tresorerie.dto.OperationBancaireDemande;
 import fr.wavy.tresorerie.dto.OperationBancaireReponse;
 import fr.wavy.tresorerie.dto.RoleTiersConsultation;
@@ -408,6 +409,52 @@ public class TresorerieService {
         verifierOperationModifiable(operation);
         verifierOperationModifiable(operation);
         operation.setActif(false);
+        operation.setDateModification(LocalDateTime.now());
+    }
+
+    public OperationBancaireReponse modifierTiersOperation(ContexteRequete contexte, Long id, ModificationTiersOperationDemande demande) {
+        var operation = trouverOperationActive(contexte, id);
+        entityManager.refresh(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+        Long ancienTiers = operation.getTiersId();
+        if (ancienTiers == null || !ancienTiers.equals(demande.tiersActuelId())) {
+            throw new RegleMetierException("TIERS_OPERATION_MODIFIE", "Le tiers actuel a changé. Actualisez la liste.");
+        }
+        if (ancienTiers.equals(demande.tiersId())) {
+            throw new RegleMetierException("NOUVEAU_TIERS_REQUIS", "Sélectionnez un autre tiers.");
+        }
+        if (!operation.isActif() || operation.isRapprochee()
+                || operation.getStatutRapprochement() != StatutOperationBancaire.NON_RAPPROCHEE
+                || operation.getFactureId() != null || operation.getSalaireId() != null
+                || operation.getPieceRapprochementId() != null || operation.getFactureRapprochementId() != null
+                || rapprochementRepository.findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
+                        contexte.tenantId(), contexte.societeCouranteId(), id).stream()
+                        .anyMatch(r -> r.getStatut() != StatutRapprochement.ANNULE)) {
+            throw new RegleMetierException("OPERATION_RAPPROCHEMENT_ACTIF",
+                    "Le tiers ne peut pas être modifié tant qu’un rapprochement ou une réservation est actif.");
+        }
+        var tiers = tiersClient.listerTiersActifs(contexte).stream()
+                .filter(t -> demande.tiersId().equals(t.id()) && Boolean.TRUE.equals(t.actif()))
+                .findFirst().orElseThrow(() -> new RegleMetierException("TIERS_ACTIF_REQUIS",
+                        "Sélectionnez un tiers actif de la société courante."));
+        affecterTiers(operation, tiers.id(), tiers.libelle(), ClassificationOperationBancaireService.typeTiers(tiers.roles()));
+        var dateModification = operation.getDateModification();
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        org.slf4j.LoggerFactory.getLogger(TresorerieService.class).info(
+                                "TIERS_OPERATION_MODIFIE tenant={} societe={} operation={} utilisateur={} ancienTiers={} nouveauTiers={} date={}",
+                                contexte.tenantId(), contexte.societeCouranteId(), id, contexte.utilisateurId(),
+                                ancienTiers, tiers.id(), dateModification);
+                    }
+                });
+        return reponseOperationListe(operation, Map.of(tiers.id(), List.of(tiers)));
+    }
+
+    private void affecterTiers(OperationBancaire operation, Long tiersId, String nom, TypeTiersReconnu type) {
+        operation.setTiersId(tiersId);
+        operation.setTiersReconnu(nom);
+        operation.setTypeTiersReconnu(type);
         operation.setDateModification(LocalDateTime.now());
     }
 
@@ -975,14 +1022,14 @@ public class TresorerieService {
                     throw new RegleMetierException("REGLE_BANCAIRE_OBSOLETE","Actualisez les propositions.");
             }
             if (choix.confirmerNature()) verifierOperationModifiable(op);
-            op.setTiersId(retenu.tiersId());op.setTiersReconnu(retenu.nomTiers());op.setTypeTiersReconnu(retenu.typeTiers());
+            affecterTiers(op, retenu.tiersId(), retenu.nomTiers(), retenu.typeTiers());
             if (choix.confirmerNature()) {
                 if (op.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE)
                     throw new RegleMetierException("NATURE_MANUELLE","La nature manuelle doit être corrigée explicitement dans le tableau.");
                 var copie=new OperationBancaire();copie.setLibelle(op.getLibelle());copie.setSens(op.getSens());copie.setTypeTiersReconnu(retenu.typeTiers());
                 op.setNatureOperation(classificationService.determinerNature(copie));op.setStatutClassification(StatutClassificationOperation.CLASSEE_MANUELLE);
             }
-            op.setDateModification(LocalDateTime.now());return null;
+            return null;
         });
         if (creation) {
             if (choix.montant().compareTo(retenu.montantPropose())!=0)

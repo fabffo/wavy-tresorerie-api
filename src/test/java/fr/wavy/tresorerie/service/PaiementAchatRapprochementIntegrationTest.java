@@ -75,6 +75,48 @@ class PaiementAchatRapprochementIntegrationTest {
         jdbc.update("update operation_bancaire set tiers_id=null,type_tiers_reconnu=null,nature_operation='SALAIRE',libelle='Paiement par carte BRIOCHE DOREE 31/01' where id=?",op);
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
     }
+    @Test void modifieLeTiersSansChangerLOperationNiLesRegles() {
+        var date = LocalDate.of(2026, 1, 7);
+        jdbc.update("""
+                update operation_bancaire set date_operation=?, debit=21.60, montant=21.60,
+                    tiers_reconnu='CLAUDE.AI', libelle='CLAUDE.AI SUBSCRIPTI' where id=?
+                """, date, op);
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(
+                new TiersTresorerieDto(22L, Set.of("FOURNISSEUR_SERVICES"), "Anthropic, PBC", null, null, null, true, false)));
+        var modifiee = service.modifierTiersOperation(c, op, new ModificationTiersOperationDemande(7L, 22L));
+        assertThat(modifiee.tiersId()).isEqualTo(22L);
+        assertThat(modifiee.tiersReconnu()).isEqualTo("Anthropic, PBC");
+        assertThat(modifiee.typeTiersReconnu()).isEqualTo(TypeTiersReconnu.FOURNISSEUR_SERVICE);
+        assertThat(modifiee.rolesTiers()).containsExactly("FOURNISSEUR_SERVICES");
+        assertThat(modifiee.dateOperation()).isEqualTo(date);
+        assertThat(modifiee.montant()).isEqualByComparingTo("21.60");
+        assertThat(modifiee.libelle()).isEqualTo("CLAUDE.AI SUBSCRIPTI");
+        assertThat(modifiee.natureOperation()).isEqualTo(NatureOperationBancaire.FACTURE_FOURNISSEUR);
+        assertThat(service.compterOperations(c, null).tiersIdentifies()).isOne();
+        assertThat(service.consulterOperation(c, op).historique()).isEmpty();
+        assertThat(operations.findById(op).orElseThrow().getDateModification()).isNotNull();
+        assertThatThrownBy(() -> service.modifierTiersOperation(c, op, new ModificationTiersOperationDemande(7L, 22L)))
+                .hasMessageContaining("tiers actuel a changé");
+        verifyNoInteractions(factures);
+    }
+
+    @Test void changementTiersRefuseUneReservationEtUnTiersHorsPerimetre() {
+        clientPieceLocale("CLAUDE.AI", false, null);
+        var demande = new ModificationTiersOperationDemande(7L, 22L);
+        var autreSociete = new ContexteRequete(c.tenantId(), c.utilisateurId(), 999L, c.roles(), null);
+        assertThatThrownBy(() -> service.modifierTiersOperation(autreSociete, op, demande))
+                .isInstanceOf(fr.wavy.tresorerie.exception.RessourceNonTrouveeException.class);
+        assertThatThrownBy(() -> service.modifierTiersOperation(c, op, demande)).hasMessageContaining("tiers actif");
+        var proposition = service.creerRapprochement(c, new RapprochementBancaireDemande(op, 42L, TypeFactureRapprochement.VENTE,
+                new BigDecimal("100"), BigDecimal.ZERO, StatutRapprochement.PROPOSE, null));
+        assertThatThrownBy(() -> service.modifierTiersOperation(c, op, demande)).hasMessageContaining("réservation");
+        service.annulerRapprochementPropose(c, proposition.id());
+        tiersAssistant(22L, "Anthropic, PBC", "FOURNISSEUR_GENERAL", false, null);
+        assertThat(service.modifierTiersOperation(c, op, demande).tiersId()).isEqualTo(22L);
+        assertThat(service.consulterOperation(c, op).historique().get(0).statut()).isEqualTo(StatutRapprochement.ANNULE);
+        verifyNoInteractions(factures);
+    }
+
     @Test void uberCreeUnePieceInterneSansJustificatifNiRechercheFactures() throws Exception {
         var date = LocalDate.of(LocalDate.now().getYear(), 1, 30);
         var montant = new BigDecimal("23.11");

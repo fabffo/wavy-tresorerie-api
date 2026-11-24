@@ -40,6 +40,7 @@ import fr.wavy.tresorerie.dto.KpiEcheancesReponse;
 import fr.wavy.tresorerie.dto.ImportReleveDemande;
 import fr.wavy.tresorerie.dto.ImportReleveReponse;
 import fr.wavy.tresorerie.dto.ImportReleveResultatDto;
+import fr.wavy.tresorerie.dto.ModificationTiersOperationDemande;
 import fr.wavy.tresorerie.dto.OperationBancaireDemande;
 import fr.wavy.tresorerie.dto.OperationBancaireReponse;
 import fr.wavy.tresorerie.dto.PieceRapprochementReponse;
@@ -183,6 +184,12 @@ public class TresorerieControleur {
     @PatchMapping("/operations-bancaires/{id}")
     public OperationBancaireReponse patchOperation(HttpServletRequest request, @PathVariable Long id, @Valid @RequestBody OperationBancaireDemande demande) {
         return tresorerieService.modifierOperation(contexte(request), id, demande);
+    }
+
+    @PatchMapping("/operations-bancaires/{id}/tiers")
+    public OperationBancaireReponse modifierTiersOperation(HttpServletRequest request, @PathVariable Long id,
+            @Valid @RequestBody ModificationTiersOperationDemande demande) {
+        return tresorerieService.modifierTiersOperation(contexte(request), id, demande);
     }
 
     @PatchMapping("/operations-bancaires/{id}/classification")

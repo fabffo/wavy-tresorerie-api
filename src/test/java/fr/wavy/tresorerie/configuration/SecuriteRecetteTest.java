@@ -87,6 +87,19 @@ class SecuriteRecetteTest {
     }
 
     @Test
+    void modifierTiersOperationExigeUneSessionEtUneSocieteAutorisee() throws Exception {
+        var requete = org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch(
+                "/api/tresorerie/operations-bancaires/20/tiers")
+                .header("X-Tenant-Id", 3).header("X-Utilisateur-Id", 7).header("X-Societe-Courante-Id", 12)
+                .contentType("application/json").content("""
+                        {"tiersActuelId":79,"tiersId":22}
+                        """);
+        mockMvc.perform(requete).andExpect(status().isUnauthorized());
+        mockMvc.perform(requete.header("Authorization", "Bearer jeton-test")).andExpect(status().isForbidden());
+        org.mockito.Mockito.verify(tresorerieService, org.mockito.Mockito.never()).modifierTiersOperation(any(), any(), any());
+    }
+
+    @Test
     void rapprochementParDefautExigeUneSessionEtUneSocieteAutorisee() throws Exception {
         String demande = """
                 {"libelle":"Facture octobre 2025","tiersId":7,"montantDisponible":6480,"confirmation":true}
