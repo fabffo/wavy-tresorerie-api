@@ -645,7 +645,11 @@ public class TresorerieService {
 
     private boolean mouvementFinancierIncompatible(OperationBancaire operation) {
         return switch (operation.getNatureOperation()) {
-            case VIREMENT_INTERNE, APPORT_CAPITAL, COMPTE_COURANT, EMPRUNT -> true;
+            case VIREMENT_INTERNE, APPORT_CAPITAL, EMPRUNT -> true;
+            case COMPTE_COURANT -> switch (operation.getTypeOperation()) {
+                case PAIEMENT_CB, PRELEVEMENT, CHEQUE, REMISE_CHEQUE, FRAIS_BANCAIRES, COTISATION, COMMISSION -> false;
+                default -> true;
+            };
             default -> false;
         };
     }

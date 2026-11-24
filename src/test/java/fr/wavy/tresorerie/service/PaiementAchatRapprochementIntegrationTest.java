@@ -1109,11 +1109,59 @@ class PaiementAchatRapprochementIntegrationTest {
         assertThat(service.compterOperations(c, p).tiersIdentifies()).isOne();
     }
 
-    @Test void fournisseurAutoriseExclutVirementInterne() {
+    @Test void fournisseurAutoriseRapprocheUneCotisationDeCompteClasseManuellement() {
+        tiersAssistant(66L, "CREDIT AGRICOLE", "BANQUE", true, null);
+        jdbc.update("""
+                update operation_bancaire set tiers_id=66, tiers_reconnu='CREDIT AGRICOLE',
+                    type_operation='COTISATION', nature_operation='COMPTE_COURANT',
+                    statut_classification='CLASSEE_MANUELLE', sens='DEBIT', debit=109, credit=0, montant=-109,
+                    statut_rapprochement='NON_RAPPROCHEE', date_operation='2026-01-02',
+                    libelle='Cotisation - Offre Compte à composer Pro - Facture N°2600201163498' where id=?
+                """, op);
+
+        var p = consultation();
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        assertThat(apercu.lignes()).singleElement().satisfies(ligne ->
+                assertThat(ligne.candidats()).singleElement().satisfies(candidat -> {
+                    assertThat(candidat.cle()).isEqualTo("CREATION_SANS_JUSTIFICATIF");
+                    assertThat(candidat.sur()).isTrue();
+                    assertThat(candidat.montantPropose()).isEqualByComparingTo("109.00");
+                }));
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(choisir(apercu, 0, false)));
+        assertThat(service.confirmerAssistant(c, demande).reussis()).isOne();
+        assertThat(service.listerPiecesRapprochement(c)).singleElement().satisfies(piece -> {
+            assertThat(piece.montant()).isEqualByComparingTo("109.00");
+            assertThat(piece.tvaDeductible()).isZero();
+            assertThat(piece.sansJustificatifOriginal()).isTrue();
+        });
+        assertThat(operations.findById(op).orElseThrow().getStatutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+        verifyNoInteractions(factures);
+    }
+
+    @Test void clientNonAutoriseRechercheUneVenteMalgreLaNatureCompteCourant() {
+        tiersAssistant(7L, "Client", "CLIENT", false, null);
+        jdbc.update("""
+                update operation_bancaire set type_operation='REMISE_CHEQUE', nature_operation='COMPTE_COURANT',
+                    statut_classification='CLASSEE_MANUELLE', sens='CREDIT', debit=0, credit=100, montant=100 where id=?
+                """, op);
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.VENTE, 7L)).thenReturn(List.of(venteOuverte()));
+        var apercu = service.previsualiserAssistant(c, Etape.CLIENTS, null, consultation());
+        assertThat(apercu.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("P:VENTE:42");
+        assertThat(service.listerPiecesRapprochement(c)).isEmpty();
+    }
+
+    @Test void fournisseurAutoriseExclutLesMouvementsFinanciersDansLApercuEtLaConfirmation() {
         tiersAssistant(7L, "Banque", "BANQUE", true, null);
-        jdbc.update("update operation_bancaire set nature_operation='VIREMENT_INTERNE' where id=?", op);
-        assertThat(service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, consultation()).lignes()).isEmpty();
-        org.mockito.Mockito.verifyNoInteractions(factures);
+        var p = consultation();
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(choisir(apercu, 0, false)));
+        for (String nature : List.of("VIREMENT_INTERNE", "COMPTE_COURANT", "APPORT_CAPITAL", "EMPRUNT")) {
+            jdbc.update("update operation_bancaire set nature_operation=?, type_operation='VIREMENT_EMIS' where id=?", nature, op);
+            assertThat(service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p).lignes()).isEmpty();
+            assertThat(service.confirmerAssistant(c, demande).refuses()).isOne();
+        }
+        assertThat(service.listerPiecesRapprochement(c)).isEmpty();
+        verifyNoInteractions(factures);
     }
 
     void tiersAssistant(Long id,String nom,String role,boolean autorise,String tva) {
