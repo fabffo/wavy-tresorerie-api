@@ -988,7 +988,7 @@ class PaiementAchatRapprochementIntegrationTest {
                 .extracting(RapprochementBancaire::getModeRapprochement).containsExactly("ROLE_CARTE");
     }
 
-    @Test void clientsProposeUnePieceTresoreriePourUnEncaissementExonere() {
+    @Test void clientsCreeUnePieceSansJustificatifEnPrioriteSurUneVenteOuverte() {
         jdbc.update("""
                 update operation_bancaire set sens='CREDIT',debit=0,credit=100,
                 type_tiers_reconnu='CLIENT',type_operation='VIREMENT_RECU',nature_operation='FACTURE_CLIENT',
@@ -997,26 +997,123 @@ class PaiementAchatRapprochementIntegrationTest {
         tiersAssistant(7L,"Client","CLIENT",false,"EXONERATION");
         var refuse=service.previsualiserAssistant(c,Etape.CLIENTS,"CARTE",consultation());
         assertThat(refuse.lignes().get(0).candidats()).isEmpty();
-        tiersAssistant(7L,"Client","CLIENT",true,"EXONERATION");
+        tiersAssistant(7L,"Client","CLIENT",true,null);
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.VENTE, 7L)).thenReturn(List.of(venteOuverte()));
+        org.mockito.Mockito.clearInvocations(factures);
         var a=service.previsualiserAssistant(c,Etape.CLIENTS,"CARTE",consultation());
-        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("CREATION");
+        assertThat(a.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("CREATION_SANS_JUSTIFICATIF");
         var demande=new Confirmation(Etape.CLIENTS,consultation(),"CARTE",true,List.of(choisir(a,0,false)));
         assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
         assertThat(operations.findById(op).orElseThrow().getStatutClassification()).isEqualTo(StatutClassificationOperation.CLASSEE_MANUELLE);
-        verify(factures,never()).enregistrerPaiement(any(),any(),anyLong(),any());
+        org.mockito.Mockito.verifyNoInteractions(factures);
+        assertThat(service.listerPiecesRapprochement(c)).singleElement().satisfies(piece -> {
+            assertThat(piece.sansJustificatifOriginal()).isTrue();
+            assertThat(piece.tvaDeductible()).isZero();
+            assertThat(piece.periodeComptableEnvisagee()).isEqualTo(java.time.YearMonth.from(piece.date()));
+            assertThat(piece.libelle()).isEqualTo(operations.findById(op).orElseThrow().getLibelle());
+        });
     }
 
-    @Test void fournisseursProposeLaPieceFiscalePuisLaReprendSansDoublon() {
+    @Test void fournisseursCreeLaPieceLocalePuisRejoueSansDoublon() {
         impotAutorise();
         var perimetre=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Perimetre(null,null,null,null,null,null,null,null,true);
         var etape=fr.wavy.tresorerie.dto.AssistantRapprochementDto.Etape.FOURNISSEURS;
         var apercu=service.previsualiserAssistant(c,etape,"CARTE",perimetre);
-        assertThat(apercu.lignes().get(0).candidats()).extracting(a -> a.cle()).containsExactly("CREATION");
+        assertThat(apercu.lignes().get(0).candidats()).extracting(a -> a.cle()).containsExactly("CREATION_SANS_JUSTIFICATIF");
         assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.PROPOSE)).isEmpty();
         var demande=new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Confirmation(etape,perimetre,"CARTE",true,List.of(choisir(apercu,0,false)));
         assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
         assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
         assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE)).hasSize(1);
+    }
+
+    @Test void fraisCreditAgricoleCreentCinqPiecesPourCentTreizeEurosPuisAnnulentUneSeule() {
+        tiersAssistant(7L, "Crédit Agricole", "BANQUE", true, null);
+        var compte = operations.findById(op).orElseThrow().getCompteBancaire();
+        var ids = new java.util.ArrayList<Long>();
+        for (int montant : List.of(15, 18, 20, 25, 35)) {
+            var operation = new OperationBancaire();
+            operation.setTenantId(c.tenantId());
+            operation.setSocieteInterneId(c.societeCouranteId());
+            operation.setCompteBancaire(compte);
+            operation.setDateOperation(LocalDate.of(2026, 1, 30));
+            operation.setTiersId(7L);
+            operation.setTiersReconnu("Crédit Agricole");
+            operation.setDebit(BigDecimal.valueOf(montant));
+            operation.setMontant(BigDecimal.valueOf(montant));
+            operation.setLibelle("Frais bancaires Crédit Agricole " + montant);
+            operation.setTypeOperation(TypeOperationBancaire.FRAIS_BANCAIRES);
+            operation.setHashOperation("%064d".formatted(montant));
+            operation.setStatutRapprochement(StatutOperationBancaire.NON_RAPPROCHEE);
+            ids.add(operations.saveAndFlush(operation).getId());
+        }
+        var p = new Perimetre(null, null, null, null, null, ids, null, "TIERS_IDENTIFIE", true);
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        assertThat(apercu.eligibles()).isEqualTo(5);
+        var choix = apercu.lignes().stream().map(l -> {
+            var candidat = l.candidats().get(0);
+            assertThat(candidat.sur()).isTrue();
+            return new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(l.operation().id(), candidat.cle(),
+                    null, candidat.tiersId(), candidat.montantPropose(), false, false, false);
+        }).toList();
+        var horsScope = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(
+                new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(op, choix.get(0).candidatCle(),
+                        null, 7L, new BigDecimal("100.00"), false, false, false)));
+        assertThat(service.confirmerAssistant(c, horsScope).lignes().get(0).code()).isEqualTo("HORS_PERIMETRE");
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, choix);
+        var bilan = service.confirmerAssistant(c, demande);
+        assertThat(bilan.reussis()).isEqualTo(5);
+        assertThat(service.confirmerAssistant(c, demande).reussis()).isEqualTo(5);
+        var pieces = service.listerPiecesRapprochement(c);
+        assertThat(pieces).hasSize(5).allMatch(piece -> piece.sansJustificatifOriginal() && piece.tvaDeductible().signum() == 0);
+        assertThat(pieces.stream().map(piece -> piece.montant()).reduce(BigDecimal.ZERO, BigDecimal::add)).isEqualByComparingTo("113");
+        Long premierLien = bilan.lignes().get(0).rapprochementId();
+        assertThat(service.annulerRapprochementValide(c, premierLien).statut()).isEqualTo(StatutRapprochement.ANNULE);
+        assertThat(operations.findById(ids.get(0)).orElseThrow().getStatutRapprochement()).isEqualTo(StatutOperationBancaire.NON_RAPPROCHEE);
+        assertThat(service.listerPiecesRapprochement(c)).filteredOn(piece -> "VALIDEE".equals(piece.statut())).hasSize(4);
+        org.mockito.Mockito.verifyNoInteractions(factures);
+    }
+
+    @Test void creationsConcurrentesPourUnMarchandUtilisentLeMemeLien() throws Exception {
+        tiersAssistant(7L, "Marchand", "MARCHAND", true, null);
+        jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB' where id=?", op);
+        var p = consultation();
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(choisir(apercu, 0, false)));
+        var depart = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var demandes = List.of(pool.submit(() -> { depart.await(); return service.confirmerAssistant(c, demande); }),
+                    pool.submit(() -> { depart.await(); return service.confirmerAssistant(c, demande); }));
+            depart.countDown();
+            var premier = demandes.get(0).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            var second = demandes.get(1).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(premier.reussis()).isOne();
+            assertThat(second.reussis()).isOne();
+            assertThat(premier.lignes().get(0).rapprochementId()).isEqualTo(second.lignes().get(0).rapprochementId());
+            assertThat(service.listerPiecesRapprochement(c)).hasSize(1);
+        } finally {
+            pool.shutdownNow();
+        }
+        verifyNoInteractions(factures);
+    }
+
+    @Test void autorisationRetireeApresApercuInterditLaCreation() {
+        tiersAssistant(7L, "Marchand", "MARCHAND", true, null);
+        var p = consultation();
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        tiersAssistant(7L, "Marchand", "MARCHAND", false, null);
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(choisir(apercu, 0, false)));
+        assertThat(service.confirmerAssistant(c, demande).refuses()).isOne();
+        assertThat(service.listerPiecesRapprochement(c)).isEmpty();
+        assertThat(service.compterOperations(c, p).tiersIdentifies()).isOne();
+    }
+
+    @Test void fournisseurAutoriseExclutVirementInterne() {
+        tiersAssistant(7L, "Banque", "BANQUE", true, null);
+        jdbc.update("update operation_bancaire set nature_operation='VIREMENT_INTERNE' where id=?", op);
+        assertThat(service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, consultation()).lignes()).isEmpty();
+        org.mockito.Mockito.verifyNoInteractions(factures);
     }
 
     void tiersAssistant(Long id,String nom,String role,boolean autorise,String tva) {
