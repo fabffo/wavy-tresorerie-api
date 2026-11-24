@@ -101,6 +101,7 @@ import fr.wavy.tresorerie.service.importreleve.LigneReleveBancaire;
 @Transactional
 public class TresorerieService {
     private static final String EXERCICE_ANTERIEUR = "EXERCICE_ANTERIEUR";
+    private static final String PIECE_SANS_JUSTIFICATIF = "PIECE_SANS_JUSTIFICATIF";
     private static final String ORIGINE_PIECE_PAR_DEFAUT = "RAPPROCHEMENT_PAR_DEFAUT";
 
     private static final int TAILLE_PAGE_OPERATIONS_DEFAUT = 25;
@@ -331,7 +332,8 @@ public class TresorerieService {
         var historiques = traces.stream().map(mapper::versReponse).toList();
         var annulationsLocales = traces.stream().filter(r -> r.getStatut() == StatutRapprochement.VALIDE)
                 .filter(r -> suiviExerciceSansDocument(r)
-                        || r.getPieceRapprochementId() != null && "PIECE_TRESORERIE".equals(r.getModeRapprochement())
+                        || r.getPieceRapprochementId() != null && ("PIECE_TRESORERIE".equals(r.getModeRapprochement())
+                                || PIECE_SANS_JUSTIFICATIF.equals(r.getModeRapprochement()))
                         && pieceRapprochementRepository.findByIdAndTenantIdAndSocieteInterneId(
                         r.getPieceRapprochementId(), c.tenantId(), c.societeCouranteId())
                         .filter(piece -> pieceLocaleCompatible(operation, r, piece))
@@ -1124,7 +1126,7 @@ public class TresorerieService {
     }
 
     private Etape etapeTrace(RapprochementBancaire r) {
-        if (EXERCICE_ANTERIEUR.equals(r.getModeRapprochement())) return null;
+        if (EXERCICE_ANTERIEUR.equals(r.getModeRapprochement()) || PIECE_SANS_JUSTIFICATIF.equals(r.getModeRapprochement())) return null;
         if ("CREATION_PIECE".equals(r.getModeRapprochement()) || "PIECE_TRESORERIE".equals(r.getModeRapprochement()) || "FACTURE_RAPPROCHEMENT".equals(r.getModeRapprochement())) return Etape.PIECES;
         if (PaiementAchatRapprochementService.ROLE_REMBOURSEMENT.equals(r.getModeRapprochement())) return Etape.SALAIRES;
         if (PaiementAchatRapprochementService.ROLE_CARTE.equals(r.getModeRapprochement())
@@ -1485,6 +1487,9 @@ public class TresorerieService {
         entityManager.refresh(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
         if (!demande.tiersId().equals(operation.getTiersId()))
             throw new RegleMetierException("TIERS_OPERATION_MODIFIE", "Le tiers de l’opération a changé. Actualisez la liste.");
+        if (demande.motifAbsenceJustificatif() != null) {
+            return rapprocherSansJustificatif(c, operation, demande);
+        }
         var tiers = tiersClient.listerTiersActifs(c).stream()
                 .filter(t -> demande.tiersId().equals(t.id()) && Boolean.TRUE.equals(t.actif())).findFirst().orElse(null);
         if (tiers == null)
@@ -1542,9 +1547,57 @@ public class TresorerieService {
         return creerPieceTresorerie(c, operation, tiers, type, libelle, ORIGINE_PIECE_PAR_DEFAUT);
     }
 
+    private OperationBancaireReponse rapprocherSansJustificatif(
+            ContexteRequete c, OperationBancaire operation, CreationPieceLocaleDemande demande) {
+        String motif = demande.motifAbsenceJustificatif().strip();
+        String libelle = demande.libelle().strip();
+        if (motif.isEmpty() || motif.length() > 500) {
+            throw new RegleMetierException("MOTIF_JUSTIFICATIF_REQUIS", "Renseignez le motif de l’absence de justificatif.");
+        }
+        var traces = rapprochementRepository.findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
+                c.tenantId(), c.societeCouranteId(), operation.getId());
+        var existante = pieceRapprochementRepository.findByOperationBancaireIdAndTenantIdAndSocieteInterneId(
+                operation.getId(), c.tenantId(), c.societeCouranteId());
+        if (existante.isPresent()) {
+            var piece = existante.get();
+            if (PIECE_SANS_JUSTIFICATIF.equals(piece.getOrigine()) && "VALIDEE".equals(piece.getStatut())
+                    && demande.tiersId().equals(piece.getTiersId()) && libelle.equals(piece.getLibelle())
+                    && demande.montantDisponible().compareTo(piece.getMontantTtc()) == 0
+                    && piece.getId().equals(operation.getPieceRapprochementId())
+                    && traces.stream().anyMatch(r -> r.getStatut() == StatutRapprochement.VALIDE
+                            && piece.getId().equals(r.getPieceRapprochementId()) && motif.equals(r.getCommentaire()))) {
+                entityManager.refresh(operation);
+                return mapper.versReponse(operation);
+            }
+            throw new RegleMetierException("PIECE_RAPPROCHEMENT_DEJA_CREEE", "Une pièce locale existe dans l’historique de cette opération.");
+        }
+        if (operation.getDateOperation().getYear() != LocalDate.now().getYear()) {
+            throw new RegleMetierException("EXERCICE_COURANT_REQUIS", "Cette création est réservée aux opérations de l’exercice courant.");
+        }
+        BigDecimal disponible = montantOperation(operation).subtract(
+                rapprochementRepository.sommeMontantParOperationEtStatut(operation.getId(), StatutRapprochement.VALIDE));
+        if (!operation.isActif() || operation.isRapprochee() || operation.getStatutRapprochement() == StatutOperationBancaire.RAPPROCHEE
+                || operation.getStatutRapprochement() == StatutOperationBancaire.IGNOREE || operation.getPieceRapprochementId() != null
+                || disponible.signum() <= 0 || disponible.compareTo(demande.montantDisponible()) != 0
+                || traces.stream().anyMatch(r -> r.getStatut() == StatutRapprochement.PROPOSE)) {
+            throw new RegleMetierException("DISPONIBLE_BANCAIRE_MODIFIE",
+                    "Le disponible a changé ou une proposition réserve l’opération. Vérifiez les rapprochements existants.");
+        }
+        return creerPieceTresorerie(c, operation, demande.tiersId(), null, TypePieceRapprochement.PIECE_TRESORERIE,
+                libelle, PIECE_SANS_JUSTIFICATIF, disponible, motif);
+    }
+
     private OperationBancaireReponse creerPieceTresorerie(
             ContexteRequete contexte, OperationBancaire operation, TiersTresorerieDto tiers, TypePieceRapprochement typePiece,
             String libellePiece, String origine
+    ) {
+        return creerPieceTresorerie(contexte, operation, tiers.id(), Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()),
+                typePiece, libellePiece, origine, montantOperation(operation), null);
+    }
+
+    private OperationBancaireReponse creerPieceTresorerie(
+            ContexteRequete contexte, OperationBancaire operation, Long tiersId, Boolean autorisee, TypePieceRapprochement typePiece,
+            String libellePiece, String origine, BigDecimal montant, String motif
     ) {
         if (pieceRapprochementRepository.existsByOperationBancaireId(operation.getId())) {
             throw new RegleMetierException("PIECE_RAPPROCHEMENT_DEJA_CREEE", "Une piece de rapprochement existe deja pour cette operation.");
@@ -1560,11 +1613,10 @@ public class TresorerieService {
         String numeroPiece = "PR-%d-%d-%06d".formatted(annee, contexte.societeCouranteId(), sequence);
         String libelle = "RAP-%s-%s-OP-%s".formatted(
                 LocalDate.now().format(DATE_RAPPROCHEMENT_FORMAT), numeroPiece, operation.getId());
-        BigDecimal montant = montantOperation(operation);
 
         PieceRapprochement piece = new PieceRapprochement();
         piece.setTenantId(contexte.tenantId()); piece.setSocieteInterneId(contexte.societeCouranteId());
-        piece.setOperationBancaireId(operation.getId()); piece.setTiersId(tiers.id()); piece.setTypePiece(typePiece);
+        piece.setOperationBancaireId(operation.getId()); piece.setTiersId(tiersId); piece.setTypePiece(typePiece);
         piece.setNumeroPiece(numeroPiece); piece.setDatePiece(operation.getDateOperation()); piece.setLibelle(libellePiece);
         piece.setOrigine(origine);
         piece.setMontantHt(montant); piece.setMontantTva(BigDecimal.ZERO); piece.setMontantTtc(montant);
@@ -1582,15 +1634,17 @@ public class TresorerieService {
         rapprochement.setTypePiece(typePiece); rapprochement.setDocumentAssocieNumero(numeroPiece);
         rapprochement.setDocumentAssocieLibelle(libellePiece);
         rapprochement.setMontantRapproche(montant); rapprochement.setEcart(BigDecimal.ZERO);
-        rapprochement.setStatut(StatutRapprochement.VALIDE); rapprochement.setModeRapprochement("PIECE_TRESORERIE");
+        rapprochement.setStatut(StatutRapprochement.VALIDE);
+        rapprochement.setModeRapprochement(motif == null ? "PIECE_TRESORERIE" : PIECE_SANS_JUSTIFICATIF);
+        if (motif != null) rapprochement.setCommentaire(motif);
         rapprochement.setLibelleRapprochement(libelle); rapprochement.setDateRapprochement(maintenant);
         rapprochement.setDateValidation(maintenant); rapprochement.setUtilisateurId(contexte.utilisateurId());
         rapprochement.setUtilisateurValidationId(contexte.utilisateurId()); rapprochementRepository.save(rapprochement);
-        if (ORIGINE_PIECE_PAR_DEFAUT.equals(origine)) {
+        if (motif != null || ORIGINE_PIECE_PAR_DEFAUT.equals(origine)) {
             entityManager.flush();
             entityManager.refresh(operation);
         }
-        return mapper.versReponse(operation, Boolean.TRUE.equals(tiers.pieceRapprochementAutorisee()));
+        return mapper.versReponse(operation, autorisee);
     }
 
     private TypePieceRapprochement determinerTypePiece(OperationBancaire operation) {
@@ -1660,13 +1714,25 @@ public class TresorerieService {
     public List<PieceRapprochementReponse> listerPiecesRapprochement(ContexteRequete contexte) {
         Map<Long, String> tiers = tiersClient.listerTiersActifs(contexte).stream()
                 .collect(Collectors.toMap(TiersTresorerieDto::id, TiersTresorerieDto::libelle, (a, b) -> a));
-        return pieceRapprochementRepository.findByTenantIdAndSocieteInterneIdOrderByDatePieceDescIdDesc(
-                contexte.tenantId(), contexte.societeCouranteId()).stream()
-                .map(piece -> new PieceRapprochementReponse(piece.getId(), piece.getNumeroPiece(), piece.getTypePiece(),
-                        piece.getTiersId(), tiers.getOrDefault(piece.getTiersId(), "Tiers " + piece.getTiersId()),
-                        piece.getDatePiece(), piece.getLibelle(), piece.getMontantTtc(), piece.getStatut(),
-                        piece.getOperationBancaireId(), piece.getLibelleRapprochement()))
-                .toList();
+        var pieces = pieceRapprochementRepository.findByTenantIdAndSocieteInterneIdOrderByDatePieceDescIdDesc(
+                contexte.tenantId(), contexte.societeCouranteId());
+        var idsSansJustificatif = pieces.stream().filter(p -> PIECE_SANS_JUSTIFICATIF.equals(p.getOrigine()))
+                .map(PieceRapprochement::getId).toList();
+        Map<Long, RapprochementBancaire> traces = idsSansJustificatif.isEmpty() ? Map.of() :
+                rapprochementRepository.findByTenantIdAndSocieteInterneIdAndPieceRapprochementIdInOrderByIdAsc(
+                        contexte.tenantId(), contexte.societeCouranteId(), idsSansJustificatif).stream()
+                        .filter(r -> PIECE_SANS_JUSTIFICATIF.equals(r.getModeRapprochement()))
+                        .collect(Collectors.toMap(RapprochementBancaire::getPieceRapprochementId, r -> r, (premiere, autre) -> premiere));
+        return pieces.stream().map(piece -> {
+            var trace = traces.get(piece.getId());
+            boolean sansJustificatif = PIECE_SANS_JUSTIFICATIF.equals(piece.getOrigine());
+            return new PieceRapprochementReponse(piece.getId(), piece.getNumeroPiece(), piece.getTypePiece(),
+                    piece.getTiersId(), tiers.getOrDefault(piece.getTiersId(), "Tiers " + piece.getTiersId()),
+                    piece.getDatePiece(), piece.getLibelle(), piece.getMontantTtc(), piece.getStatut(),
+                    piece.getOperationBancaireId(), piece.getLibelleRapprochement(), piece.getSocieteInterneId(),
+                    trace == null ? null : trace.getOperationBancaire().getSens(), trace == null ? null : trace.getCommentaire(),
+                    sansJustificatif, sansJustificatif ? BigDecimal.ZERO : null);
+        }).toList();
     }
 
     public RapprochementBancaireReponse creerRapprochement(ContexteRequete contexte, RapprochementBancaireDemande demande) {
@@ -1682,7 +1748,7 @@ public class TresorerieService {
             entityManager.refresh(operation);
             return mapper.versReponse(trouverRapprochement(contexte, id));
         }
-        verifierAbsenceSuiviExerciceActif(operation);
+        verifierAbsenceSuiviBancaireActif(operation);
         RapprochementBancaire rapprochement = new RapprochementBancaire();
         rapprochement.setTenantId(contexte.tenantId());
         rapprochement.setSocieteInterneId(contexte.societeCouranteId());
@@ -1860,11 +1926,14 @@ public class TresorerieService {
         return mapper.versReponse(rapprochement);
     }
 
-    private void verifierAbsenceSuiviExerciceActif(OperationBancaire operation) {
+    private void verifierAbsenceSuiviBancaireActif(OperationBancaire operation) {
         entityManager.lock(operation, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
-        if (rapprochementRepository.findByOperationBancaireIdAndStatut(operation.getId(), StatutRapprochement.VALIDE)
-                .stream().anyMatch(r -> EXERCICE_ANTERIEUR.equals(r.getModeRapprochement()))) {
+        var valides = rapprochementRepository.findByOperationBancaireIdAndStatut(operation.getId(), StatutRapprochement.VALIDE);
+        if (valides.stream().anyMatch(r -> EXERCICE_ANTERIEUR.equals(r.getModeRapprochement()))) {
             throw new RegleMetierException("SUIVI_EXERCICE_ACTIF", "L’opération est déjà rapprochée sur un exercice antérieur.");
+        }
+        if (valides.stream().anyMatch(r -> PIECE_SANS_JUSTIFICATIF.equals(r.getModeRapprochement()))) {
+            throw new RegleMetierException("PIECE_SANS_JUSTIFICATIF_ACTIVE", "L’opération est déjà rapprochée avec une pièce interne sans justificatif.");
         }
     }
 
@@ -1886,8 +1955,10 @@ public class TresorerieService {
         var autres = autresAffectationsLocales(contexte, rapprochement, piece);
         if (!affectationsLocalesCompatibles(operation, rapprochement, piece, autres)) throw pieceLocaleIncoherente();
 
-        boolean origineExclusive = ("AUTOMATIQUE".equals(piece.getOrigine()) || ORIGINE_PIECE_PAR_DEFAUT.equals(piece.getOrigine()))
-                && "PIECE_TRESORERIE".equals(rapprochement.getModeRapprochement())
+        boolean origineExclusive = ("AUTOMATIQUE".equals(piece.getOrigine()) || ORIGINE_PIECE_PAR_DEFAUT.equals(piece.getOrigine())
+                || PIECE_SANS_JUSTIFICATIF.equals(piece.getOrigine()))
+                && ("PIECE_TRESORERIE".equals(rapprochement.getModeRapprochement())
+                        || PIECE_SANS_JUSTIFICATIF.equals(rapprochement.getModeRapprochement()))
                 && rapprochement.getMontantRapproche().compareTo(piece.getMontantTtc()) == 0
                 && piece.getNumeroPiece().equals(rapprochement.getDocumentAssocieNumero())
                 && piece.getLibelleRapprochement().equals(rapprochement.getLibelleRapprochement());
@@ -2375,7 +2446,7 @@ public class TresorerieService {
             entityManager.refresh(operation);
             return;
         }
-        verifierAbsenceSuiviExerciceActif(operation);
+        verifierAbsenceSuiviBancaireActif(operation);
         RapprochementBancaire rapprochement = new RapprochementBancaire();
         rapprochement.setTenantId(contexte.tenantId());
         rapprochement.setSocieteInterneId(contexte.societeCouranteId());
@@ -2406,7 +2477,7 @@ public class TresorerieService {
     private void creerRapprochementSalaire(
             ContexteRequete contexte, OperationBancaire operation, FactureOuverteRapprochementDto salaire,
             YearMonth periode, BigDecimal montant, StatutRapprochement statut, String libelle) {
-        verifierAbsenceSuiviExerciceActif(operation);
+        verifierAbsenceSuiviBancaireActif(operation);
         RapprochementBancaire rapprochement = new RapprochementBancaire();
         rapprochement.setTenantId(contexte.tenantId());
         rapprochement.setSocieteInterneId(contexte.societeCouranteId());

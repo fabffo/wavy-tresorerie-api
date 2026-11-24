@@ -75,6 +75,92 @@ class PaiementAchatRapprochementIntegrationTest {
         jdbc.update("update operation_bancaire set tiers_id=null,type_tiers_reconnu=null,nature_operation='SALAIRE',libelle='Paiement par carte BRIOCHE DOREE 31/01' where id=?",op);
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
     }
+    @Test void uberCreeUnePieceInterneSansJustificatifNiRechercheFactures() throws Exception {
+        var date = LocalDate.of(LocalDate.now().getYear(), 1, 30);
+        var montant = new BigDecimal("23.11");
+        jdbc.update("""
+                update operation_bancaire set date_operation=?, debit=?, montant=?, type_operation='PAIEMENT_CB',
+                    nature_operation='SALAIRE', tiers_reconnu='UBER' where id=?
+                """, date, montant, montant, op);
+        tiersAssistant(7L, "UBER", "MARCHAND", false, null);
+        String libelle = "Uber Eats — justificatif non disponible";
+        String motif = "Justificatif manquant";
+        var demande = new CreationPieceLocaleDemande(libelle, 7L, montant, true, motif);
+        var pool = Executors.newFixedThreadPool(2);
+        OperationBancaireReponse resultat;
+        try {
+            var premier = pool.submit(() -> service.rapprocherParDefaut(c, op, demande));
+            var rejeu = pool.submit(() -> service.rapprocherParDefaut(c, op, demande));
+            resultat = premier.get(10, TimeUnit.SECONDS);
+            assertThat(rejeu.get(10, TimeUnit.SECONDS).pieceRapprochementId()).isEqualTo(resultat.pieceRapprochementId());
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(resultat.statutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+        assertThat(resultat.numeroPieceAssociee()).startsWith("PR-");
+        assertThat(resultat.natureOperation()).isEqualTo(NatureOperationBancaire.SALAIRE);
+        var piece = service.listerPiecesRapprochement(c).get(0);
+        assertThat(piece.numero()).isEqualTo(resultat.numeroPieceAssociee());
+        assertThat(piece.type()).isEqualTo(TypePieceRapprochement.PIECE_TRESORERIE);
+        assertThat(piece.tiersId()).isEqualTo(7L);
+        assertThat(piece.societeInterneId()).isEqualTo(c.societeCouranteId());
+        assertThat(piece.date()).isEqualTo(date);
+        assertThat(piece.montant()).isEqualByComparingTo(montant);
+        assertThat(piece.libelle()).isEqualTo(libelle);
+        assertThat(piece.sensBancaire()).isEqualTo(SensOperation.DEBIT);
+        assertThat(piece.motif()).isEqualTo(motif);
+        assertThat(piece.sansJustificatifOriginal()).isTrue();
+        assertThat(piece.tvaDeductible()).isEqualByComparingTo(BigDecimal.ZERO);
+        var detail = service.consulterOperation(c, op);
+        assertThat(detail.annulationsLocales()).hasSize(1);
+        assertThat(detail.historique()).hasSize(1);
+        service.annulerRapprochementValide(c, detail.annulationsLocales().get(0));
+        assertThat(service.consulterOperation(c, op).solde()).isEqualByComparingTo(montant);
+        assertThat(service.listerPiecesRapprochement(c).get(0).statut()).isEqualTo("ANNULEE");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("historique");
+        verifyNoInteractions(factures);
+    }
+
+    @Test void pieceSansJustificatifExigeMotifConfirmationEtDisponibleExact() {
+        jdbc.update("update operation_bancaire set date_operation=? where id=?", LocalDate.now(), op);
+        var montant = new BigDecimal("100");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op,
+                new CreationPieceLocaleDemande("Libellé", 7L, montant, false, "Motif"))).hasMessageContaining("confirmez");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op,
+                new CreationPieceLocaleDemande("Libellé", 7L, montant, true, " "))).hasMessageContaining("motif");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op,
+                new CreationPieceLocaleDemande("Libellé", 7L, new BigDecimal("99"), true, "Motif"))).hasMessageContaining("disponible");
+        var demande = new CreationPieceLocaleDemande("Libellé", 7L, montant, true, "Motif");
+        var autreSociete = new ContexteRequete(c.tenantId(), c.utilisateurId(), 999L, c.roles(), null);
+        assertThatThrownBy(() -> service.rapprocherParDefaut(autreSociete, op, demande))
+                .isInstanceOf(fr.wavy.tresorerie.exception.RessourceNonTrouveeException.class);
+        jdbc.update("update operation_bancaire set date_operation=? where id=?", LocalDate.now().minusYears(1), op);
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("exercice courant");
+        assertThat(service.consulterOperation(c, op).historique()).isEmpty();
+        verifyNoInteractions(factures);
+    }
+
+    @Test void pieceSansJustificatifCouvreLeSoldeEtRespecteLesReservations() {
+        clientPieceLocale("Tiers sans justificatif", false, null);
+        jdbc.update("update operation_bancaire set date_operation=? where id=?", LocalDate.now(), op);
+        service.creerRapprochement(c, new RapprochementBancaireDemande(op, 42L, TypeFactureRapprochement.VENTE,
+                new BigDecimal("40"), BigDecimal.ZERO, StatutRapprochement.VALIDE, null));
+        var propose = service.creerRapprochement(c, new RapprochementBancaireDemande(op, 43L, TypeFactureRapprochement.VENTE,
+                new BigDecimal("60"), BigDecimal.ZERO, StatutRapprochement.PROPOSE, null));
+        var demande = new CreationPieceLocaleDemande("Libellé", 7L, new BigDecimal("60"), true, "Motif");
+        assertThatThrownBy(() -> service.rapprocherParDefaut(c, op, demande)).hasMessageContaining("réserve");
+        service.annulerRapprochementPropose(c, propose.id());
+        var resultat = service.rapprocherParDefaut(c, op, demande);
+        assertThat(resultat.statutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+        assertThat(service.listerPiecesRapprochement(c).get(0).montant()).isEqualByComparingTo("60");
+        var detail = service.consulterOperation(c, op);
+        service.annulerRapprochementValide(c, detail.annulationsLocales().get(0));
+        detail = service.consulterOperation(c, op);
+        assertThat(detail.operation().statutRapprochement()).isEqualTo(StatutOperationBancaire.PARTIELLEMENT_RAPPROCHEE);
+        assertThat(detail.solde()).isEqualByComparingTo("60");
+        verifyNoInteractions(factures);
+    }
+
     @Test void macifSuiviSurExerciceAnterieurSansDocumentPuisAnnulation() {
         clientPieceLocale("MACIF", false, null);
         jdbc.update("update operation_bancaire set date_operation='2026-01-26', credit=6480, montant=6480 where id=?", op);

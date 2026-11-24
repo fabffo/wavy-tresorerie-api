@@ -13,5 +13,10 @@ public record CreationPieceLocaleDemande(
         @NotBlank @Size(max = 500) String libelle,
         @NotNull @Positive Long tiersId,
         @NotNull @Positive @Digits(integer = 17, fraction = 2) BigDecimal montantDisponible,
-        @NotNull @AssertTrue Boolean confirmation
-) {}
+        @NotNull @AssertTrue Boolean confirmation,
+        @Size(max = 500) String motifAbsenceJustificatif
+) {
+    public CreationPieceLocaleDemande(String libelle, Long tiersId, BigDecimal montantDisponible, Boolean confirmation) {
+        this(libelle, tiersId, montantDisponible, confirmation, null);
+    }
+}

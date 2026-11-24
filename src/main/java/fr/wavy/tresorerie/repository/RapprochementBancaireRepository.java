@@ -13,6 +13,9 @@ import fr.wavy.tresorerie.modele.StatutRapprochement;
 public interface RapprochementBancaireRepository extends JpaRepository<RapprochementBancaire, Long> {
     List<RapprochementBancaire> findByTenantIdAndSocieteInterneIdAndPieceRapprochementId(
             Long tenantId, Long societeInterneId, Long pieceRapprochementId);
+    @org.springframework.data.jpa.repository.EntityGraph(attributePaths = "operationBancaire")
+    List<RapprochementBancaire> findByTenantIdAndSocieteInterneIdAndPieceRapprochementIdInOrderByIdAsc(
+            Long tenantId, Long societeInterneId, java.util.Collection<Long> pieceRapprochementIds);
     List<RapprochementBancaire> findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(Long tenantId, Long societeInterneId);
     List<RapprochementBancaire> findByTenantIdAndSocieteInterneIdAndOperationBancaireIdOrderByDateRapprochementDescIdDesc(
             Long tenantId, Long societeInterneId, Long operationBancaireId);
