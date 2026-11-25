@@ -52,6 +52,50 @@ public final class RapprochementCarteMatcher {
                         || (Math.min(t.length(), b.length()) >= 5 && (t.startsWith(b) || b.startsWith(t)))));
     }
 
+    static List<PropositionCarteDto> propositionsFournisseurs(OperationBancaire op,
+            List<PieceCarteRapprochementDto> pieces, List<OperationBancaire> operations, List<RapprochementBancaire> traces) {
+        var compatibles = new LinkedHashMap<PieceCarteRapprochementDto, PropositionCarteDto>();
+        for (var piece : pieces) {
+            comparerFournisseurs(op, piece).filter(p -> !reservee(op, piece.id(), traces))
+                    .ifPresent(p -> compatibles.put(piece, p));
+        }
+        return compatibles.entrySet().stream().map(candidat -> {
+            var piece = candidat.getKey();
+            boolean ambiguite = compatibles.size() > 1
+                    || operations.stream().anyMatch(autre -> !Objects.equals(autre.getId(), op.getId())
+                            && comparerFournisseurs(autre, piece).isPresent()
+                            && !reservee(autre, piece.id(), traces));
+            return candidat.getValue().avecConflits(ambiguite, ambiguite);
+        }).toList();
+    }
+
+    private static boolean reservee(OperationBancaire op, Long factureId, List<RapprochementBancaire> traces) {
+        return traces.stream().anyMatch(r -> r.getStatut() != StatutRapprochement.ANNULE
+                && (Objects.equals(op.getId(), r.getOperationBancaire().getId())
+                    || r.getTypeFacture() == TypeFactureRapprochement.ACHAT && factureId.equals(r.getFactureId())));
+    }
+
+    static Optional<PropositionCarteDto> comparerFournisseurs(OperationBancaire op, PieceCarteRapprochementDto piece) {
+        var date = piece.dateDepenseFiable() != null ? piece.dateDepenseFiable() : piece.datePiece();
+        if (!op.isActif() || op.isRapprochee() || op.getSens() != SensOperation.DEBIT
+                || op.getTypeOperation() != TypeOperationBancaire.PAIEMENT_CB
+                || op.getStatutRapprochement() != StatutOperationBancaire.NON_RAPPROCHEE
+                || TresorerieService.mouvementFinancierIncompatible(op)
+                || !Objects.equals(op.getTenantId(), piece.tenantId())
+                || !Objects.equals(op.getSocieteInterneId(), piece.societeInterneId())
+                || op.getTiersId() == null || !op.getTiersId().equals(piece.tiersId())
+                || date == null || op.getDateOperation() == null || op.getDateOperation().isBefore(date)
+                || op.getDateOperation().isAfter(date.plusDays(3))
+                || piece.montantTtc() == null || piece.montant() == null || piece.montantTtc().signum() <= 0
+                || piece.montantTtc().compareTo(montant(op)) != 0 || piece.montant().compareTo(piece.montantTtc()) != 0) {
+            return Optional.empty();
+        }
+        return Optional.of(new PropositionCarteDto(op.getId(), piece.id(), piece.tiersId(), piece.numeroPiece(),
+                op.getLibelle(), piece.nomTiers(), op.getDateOperation(), null, date, montant(op),
+                piece.montantTtc(), piece.montantTtc(), BigDecimal.ZERO, false, true, false, false, false,
+                List.of("Tiers identifié et montant TTC exact", "Date bancaire comprise entre la date de référence et J+3")));
+    }
+
     public static Optional<PropositionCarteDto> comparer(OperationBancaire op, PieceCarteRapprochementDto piece) {
         if (!op.isActif() || op.isRapprochee() || op.getSens() != SensOperation.DEBIT
                 || op.getStatutRapprochement() != StatutOperationBancaire.NON_RAPPROCHEE

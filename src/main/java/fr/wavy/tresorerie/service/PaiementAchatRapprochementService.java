@@ -138,20 +138,29 @@ public class PaiementAchatRapprochementService {
     }
 
     public void confirmerCarteManuellement(ContexteRequete c, Long operationId, Long factureId, BigDecimal montant) {
-        confirmerCarteParRole(c, operationId, factureId, montant, null);
+        confirmerCarteParRole(c, operationId, factureId, montant, false);
     }
 
-    public Long confirmerCarteParRole(ContexteRequete c, Long operationId, Long factureId, BigDecimal montant, Boolean justificatif) {
+    public Long confirmerCarteFournisseurs(ContexteRequete c, Long operationId, Long factureId, BigDecimal montant) {
+        return confirmerCarteParRole(c, operationId, factureId, montant, true);
+    }
+
+    private Long confirmerCarteParRole(ContexteRequete c, Long operationId, Long factureId, BigDecimal montant, boolean automatique) {
         Long id = tx(() -> {
             var op = verrouiller(c, operationId);
             verrouillerPieceCarte(c, factureId);
             verifierReservationCarte(c, operationId, factureId);
-            if (justificatif != null) {
-                var carte = factures.listerCartesOuvertes(c).stream().filter(p -> factureId.equals(p.id()))
-                        .findFirst().flatMap(p -> RapprochementCarteMatcher.comparer(op, p))
-                        .filter(p -> !p.conflit()).orElseThrow(() -> erreur("CARTE_NON_ELIGIBLE", "La pièce carte n’est plus compatible."));
-                if ((carte.dateAtypique() || !carte.commercantReconnu()) && !justificatif)
-                    throw erreur("JUSTIFICATIF_REQUIS", "Vérifiez le justificatif avant de confirmer ce paiement carte.");
+            if (automatique) {
+                boolean recherchePieces = tiers.listerTiersActifs(c).stream()
+                        .anyMatch(t -> t.id().equals(op.getTiersId()) && !Boolean.FALSE.equals(t.actif())
+                                && !Boolean.TRUE.equals(t.pieceRapprochementAutorisee()));
+                if (!recherchePieces) throw erreur("CARTE_NON_ELIGIBLE", "L’autorisation du tiers a changé.");
+                var autres = operations.findByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochementOrderByDateOperationDescIdDesc(
+                        c.tenantId(), c.societeCouranteId(), StatutOperationBancaire.NON_RAPPROCHEE);
+                var traces = rapprochements.findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(c.tenantId(), c.societeCouranteId());
+                boolean certaine = RapprochementCarteMatcher.propositionsFournisseurs(op, factures.listerCartesOuvertes(c), autres, traces)
+                        .stream().anyMatch(p -> factureId.equals(p.factureId()) && !p.conflit() && montant.compareTo(p.montantRapproche()) == 0);
+                if (!certaine) throw erreur("CARTE_NON_ELIGIBLE", "La correspondance carte n’est plus certaine. Actualisez les propositions.");
             }
             return preparerVerrouille(c, op, factureId, montant, 0,
                     "CARTE-OP-" + operationId + "-FA-" + factureId, ROLE_CARTE);

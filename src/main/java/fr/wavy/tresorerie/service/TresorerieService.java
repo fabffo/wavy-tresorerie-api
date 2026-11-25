@@ -643,7 +643,7 @@ public class TresorerieService {
                 && (etape == Etape.CLIENTS || etape == Etape.FOURNISSEURS);
     }
 
-    private boolean mouvementFinancierIncompatible(OperationBancaire operation) {
+    static boolean mouvementFinancierIncompatible(OperationBancaire operation) {
         return switch (operation.getNatureOperation()) {
             case VIREMENT_INTERNE, APPORT_CAPITAL, EMPRUNT -> true;
             case COMPTE_COURANT -> switch (operation.getTypeOperation()) {
@@ -758,7 +758,7 @@ public class TresorerieService {
                 if (trouves.isEmpty()) anomalies.add("Aucun tiers proposé : rechercher dans Tiers avant une création explicite.");
                 if (o.getStatutClassification()==StatutClassificationOperation.CLASSEE_MANUELLE) anomalies.add("Classification manuelle conservée.");
             } else if (etape==Etape.NOTES_FRAIS && !"REMBOURSEMENT".equals(famille)) {
-                ajouterCandidatsCarte(o, cartes, autresCartes, traces, candidats, false);
+                ajouterCandidatsCarte(o, cartes, autresCartes, traces, candidats);
             } else if (etape==Etape.PIECES) {
                 var raisons=raisonsPieceAutomatique(c,o,t,traces,cache);
                 if (raisons.isEmpty()) {
@@ -798,12 +798,24 @@ public class TresorerieService {
                         idsCartesOuvertes = cartes.stream().map(PieceCarteRapprochementDto::id).collect(Collectors.toSet());
                     }
                     var idsCartes = idsCartesOuvertes;
-                    if (carteEntreprise) ajouterCandidatsCarte(o, cartes, autresCartes, traces, candidats, true);
+                    if (carteEntreprise) {
+                        for (var carte : RapprochementCarteMatcher.propositionsFournisseurs(o, cartes, autresCartes, traces)) {
+                            var avertissements = carte.ambiguite()
+                                    ? List.of("Plusieurs opérations ou pièces carte compatibles") : List.<String>of();
+                            candidats.add(new Candidat("C:" + carte.factureId(), carte.tiersId(), carte.nomTiers(),
+                                    TypeTiersReconnu.FOURNISSEUR, carte.factureId(), carte.numeroPiece(), "ACHAT",
+                                    carte.montantPiece(), carte.montantRapproche(), carte.dateDepense(), null,
+                                    !carte.conflit(), carte.criteres(), avertissements, null, carte));
+                        }
+                    }
                     String cle=type+":"+t.id()+":"+etape+":"+periodeSalaireOperation(o.getDateOperation());
                     var factures=cache.computeIfAbsent(cle,k -> {
                         if (parcours==Etape.SALAIRES) { var periode=periodeSalaireOperation(o.getDateOperation());return facturesClient.listerSalairesOuverts(c,t.id(),periode.getYear(),periode.getMonthValue(),null); }
                         if (parcours==Etape.NOTES_FRAIS) return facturesClient.listerFacturesAchatNotesFraisOuvertes(c,t.id(),null);
-                        return facturesClient.listerFacturesOuvertes(c,type,t.id()).stream().filter(f -> type!=TypeFactureRapprochement.ACHAT || !idsCartes.contains(f.id())).toList();
+                        return facturesClient.listerFacturesOuvertes(c,type,t.id()).stream()
+                                .filter(f -> type != TypeFactureRapprochement.ACHAT || !idsCartes.contains(f.id())
+                                        && !(boutonClientsFournisseurs && "DEPENSE_CARTE_ENTREPRISE".equals(f.typePiece())))
+                                .toList();
                     });
                     var pieces = new ArrayList<>(factures);
                     if (consultation && etape==Etape.SALAIRES) {
@@ -906,17 +918,15 @@ public class TresorerieService {
     }
 
     private void ajouterCandidatsCarte(OperationBancaire o, List<PieceCarteRapprochementDto> cartes,
-            List<OperationBancaire> autresCartes, List<RapprochementBancaire> traces, List<Candidat> candidats, boolean consultation) {
+            List<OperationBancaire> autresCartes, List<RapprochementBancaire> traces, List<Candidat> candidats) {
         for (var piece:cartes) RapprochementCarteMatcher.comparer(o,piece).ifPresent(a -> {
             boolean ambigu=autresCartes.stream().anyMatch(autre -> !autre.getId().equals(o.getId()) && RapprochementCarteMatcher.comparer(autre,piece).isPresent())
                 || cartes.stream().anyMatch(autre -> !autre.id().equals(piece.id()) && RapprochementCarteMatcher.comparer(o,autre).isPresent());
             boolean conflit=a.conflit() || traces.stream().anyMatch(r -> (r.getStatut()==StatutRapprochement.PROPOSE || r.getStatut()==StatutRapprochement.VALIDE)
                 && (r.getOperationBancaire().getId().equals(o.getId()) || (r.getTypeFacture()==TypeFactureRapprochement.ACHAT && piece.id().equals(r.getFactureId())))
                 && !(r.getOperationBancaire().getId().equals(o.getId()) && piece.id().equals(r.getFactureId())
-                    && (consultation ? PaiementAchatRapprochementService.carte(r.getModeRapprochement()) : "CARTE_ENTREPRISE".equals(r.getModeRapprochement()))));
-            if (consultation && a.conflit()) return;
+                    && "CARTE_ENTREPRISE".equals(r.getModeRapprochement())));
             var carte=a.avecConflits(ambigu,conflit);
-            if (consultation) carte = carte.sansAffectation();
             var avert=new ArrayList<String>();
             if (ambigu) avert.add("Opération ou pièce partagée avec une autre proposition");
             if (conflit) avert.add("Conflit de tiers ou de réservation");
@@ -1160,8 +1170,7 @@ public class TresorerieService {
                 throw new RegleMetierException("JUSTIFICATIF_REQUIS","Vérifiez explicitement le justificatif pour cette date ou ce commerçant.");
             if (retenu.carte().conflit()) throw new RegleMetierException("CONFLIT_CARTE","Tiers incompatible ou pièce déjà réservée.");
             if (demande.perimetre()!=null && Boolean.TRUE.equals(demande.perimetre().consultation()) && demande.etape()==Etape.FOURNISSEURS) {
-                return paiementsAchats.confirmerCarteParRole(c, choix.operationId(), retenu.pieceId(),
-                        choix.montant(), choix.verifierJustificatif());
+                return paiementsAchats.confirmerCarteFournisseurs(c, choix.operationId(), retenu.pieceId(), choix.montant());
             }
             return paiementsAchats.confirmerCarte(c,choix.operationId(),new ConfirmationCarteDemande(retenu.pieceId(),retenu.tiersId(),true,choix.confirmerAffectation(),choix.verifierJustificatif()));
         }

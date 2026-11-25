@@ -66,7 +66,7 @@ class PaiementAchatRapprochementIntegrationTest {
     Long preparer(Long facture,String montant) {return paiements.preparer(c,op,facture,new BigDecimal(montant),100,"RAP-"+facture,"MANUEL");}
     PieceCarteRapprochementDto carte() {
         return new PieceCarteRapprochementDto(10L,c.tenantId(),c.societeCouranteId(),7L,"FA-10",
-                LocalDate.of(2026,1,31),LocalDate.of(2020,1,31),new BigDecimal("100.00"),"SSP France","SSP France","Pièce carte");
+                LocalDate.of(2026,1,31),LocalDate.of(2020,1,31),new BigDecimal("100.00"),"SSP France","SSP France","Pièce carte",LocalDate.of(2026,1,31),new BigDecimal("100.00"));
     }
     ConfirmationCarteDemande confirmation(boolean affectation, boolean date) {
         return new ConfirmationCarteDemande(10L,7L,true,affectation,date);
@@ -456,7 +456,7 @@ class PaiementAchatRapprochementIntegrationTest {
         sansTiers();
         assertThatThrownBy(()->paiements.confirmerCarte(c,op,new ConfirmationCarteDemande(10L,7L,false,true,false))).hasMessageContaining("Confirmation");
         var p=carte();
-        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(p.id(),999L,p.societeInterneId(),p.tiersId(),p.numeroPiece(),p.dateDepense(),p.datePiece(),p.montant(),p.nomTiers(),p.nomMarchand(),p.libelle())));
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(p.id(),999L,p.societeInterneId(),p.tiersId(),p.numeroPiece(),p.dateDepense(),p.datePiece(),p.montant(),p.nomTiers(),p.nomMarchand(),p.libelle(),p.dateDepenseFiable(),p.montantTtc())));
         assertThat(service.proposerCartes(c).propositions()).isEmpty();
         assertThatThrownBy(()->paiements.confirmerCarte(c,op,confirmation(true,false))).hasMessageContaining("société");
         assertThat(operations.findById(op).orElseThrow().getTiersId()).isNull();
@@ -488,7 +488,7 @@ class PaiementAchatRapprochementIntegrationTest {
     }
     @Test void dateAtypiqueRequiertUnConsentementDistinct() {
         sansTiers();var p=carte();
-        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(p.id(),p.tenantId(),p.societeInterneId(),p.tiersId(),p.numeroPiece(),LocalDate.of(2025,1,1),p.datePiece(),p.montant(),p.nomTiers(),p.nomMarchand(),p.libelle())));
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(p.id(),p.tenantId(),p.societeInterneId(),p.tiersId(),p.numeroPiece(),LocalDate.of(2025,1,1),p.datePiece(),p.montant(),p.nomTiers(),p.nomMarchand(),p.libelle(),p.dateDepenseFiable(),p.montantTtc())));
         assertThat(service.proposerCartes(c).propositions().get(0).dateAtypique()).isTrue();
         assertThatThrownBy(()->paiements.confirmerCarte(c,op,confirmation(true,false))).hasMessageContaining("date atypique");
         assertThat(operations.findById(op).orElseThrow().getTiersId()).isNull();
@@ -856,7 +856,7 @@ class PaiementAchatRapprochementIntegrationTest {
         jdbc.update("update operation_bancaire set debit=42,montant=42,libelle='PAIEMENT SSP FRANCE 31/01' where id=?",autre);
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte(),
                 new PieceCarteRapprochementDto(11L,c.tenantId(),c.societeCouranteId(),7L,"FA-11",
-                        LocalDate.of(2026,1,31),LocalDate.of(2026,1,31),new BigDecimal("42.00"),"SSP France","SSP France","Pièce carte")));
+                        LocalDate.of(2026,1,31),LocalDate.of(2026,1,31),new BigDecimal("42.00"),"SSP France","SSP France","Pièce carte",null,null)));
         return autre;
     }
     @Test void lotDeuxPiecesDistinctesEtDoubleSoumissionIdempotente() {
@@ -885,7 +885,7 @@ class PaiementAchatRapprochementIntegrationTest {
         jdbc.update("update operation_bancaire set libelle='PAIEMENT INDIGO 31/01',debit=2,montant=2 where id=?",op);
         jdbc.update("update operation_bancaire set libelle='PAIEMENT FREE MOBILE 31/01',debit=2,montant=2 where id=?",autre);
         when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(10L,c.tenantId(),c.societeCouranteId(),7L,"FA-10",
-                LocalDate.of(2026,1,31),LocalDate.of(2026,1,31),new BigDecimal("2.00"),"INDIGO","INDIGO","Parking")));
+                LocalDate.of(2026,1,31),LocalDate.of(2026,1,31),new BigDecimal("2.00"),"INDIGO","INDIGO","Parking",null,null)));
         assertThat(service.proposerCartes(c).propositions()).hasSize(2).allMatch(PropositionCarteDto::ambiguite);
         assertThat(service.confirmerCartes(c,lot(op)).lignes().get(0).code()).isEqualTo("AMBIGUITE_CARTE");
         assertThat(service.confirmerCartes(c,lot(autre)).lignes().get(0).code()).isEqualTo("VERIFICATION_INDIVIDUELLE_CARTE");
@@ -986,6 +986,47 @@ class PaiementAchatRapprochementIntegrationTest {
         assertThat(service.confirmerAssistant(c,demande).reussis()).isEqualTo(1);
         assertThat(rapprochements.findByOperationBancaireIdAndStatut(op,StatutRapprochement.VALIDE))
                 .extracting(RapprochementBancaire::getModeRapprochement).containsExactly("ROLE_CARTE");
+    }
+
+    @Test void carteFournisseursConfirmeLeTtcAJPlusTroisAvecLeParcoursExistant() {
+        tiersAssistant(7L, "Marchand", "MARCHAND", false, null);
+        jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB', libelle='CB ALIAS 20/01', date_operation='2026-01-26' where id=?", op);
+        var date = LocalDate.of(2026, 1, 23);
+        var ttc = new BigDecimal("100.00");
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(10L,
+                c.tenantId(), c.societeCouranteId(), 7L, "FA-10", date, date, ttc, "Marchand", "Marchand", "Carte", date, ttc)));
+        var achat = new FactureOuverteRapprochementDto(10L, "ACHAT", 7L, "FA-10", date, LocalDate.of(2026, 3, 1),
+                ttc, "Carte", "Marchand", ttc, "NON_PAYEE", "DEPENSE_CARTE_ENTREPRISE");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.ACHAT, 7L)).thenReturn(List.of(achat));
+        var p = consultation();
+        var a = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        assertThat(a.lignes().get(0).candidats()).singleElement().satisfies(candidat -> {
+            assertThat(candidat.sur()).isTrue();
+            assertThat(candidat.avertissements()).isEmpty();
+        });
+        var selection = new fr.wavy.tresorerie.dto.AssistantRapprochementDto.Choix(
+                op, "C:10", 10L, 7L, ttc, false, false, false);
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(selection));
+        assertThat(service.confirmerAssistant(c, demande).reussis()).isOne();
+        assertThat(service.confirmerAssistant(c, demande).reussis()).isOne();
+        assertThat(operations.findById(op).orElseThrow().getStatutRapprochement()).isEqualTo(StatutOperationBancaire.RAPPROCHEE);
+        verify(factures).enregistrerPaiement(eq(c), eq(TypeFactureRapprochement.ACHAT), eq(10L),
+                argThat(paiement -> paiement.montant().compareTo(ttc) == 0));
+    }
+
+    @Test void carteFournisseursRefuseSiUnAutreDebitCompatibleApparaitHorsPerimetre() {
+        tiersAssistant(7L, "Marchand", "MARCHAND", false, null);
+        jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB', date_operation='2026-01-31' where id=?", op);
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(carte()));
+        achatsAvecCarteOuverte();
+        var p = new Perimetre(null, null, null, null, null, List.of(op), null, null, true);
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        assertThat(apercu.lignes().get(0).candidats().get(0).sur()).isTrue();
+        Long autre = deuxiemeCarte();
+        jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB', tiers_id=7, date_operation='2026-02-01' where id=?", autre);
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(choisir(apercu, 0, false)));
+        assertThat(service.confirmerAssistant(c, demande).conflits()).isOne();
+        verify(factures, never()).enregistrerPaiement(any(), any(), anyLong(), any());
     }
 
     @Test void clientsCreeUnePieceSansJustificatifEnPrioriteSurUneVenteOuverte() {

@@ -14,9 +14,57 @@ class RapprochementCarteMatcherTest {
         o.setLibelle(libelle); o.setNatureOperation(NatureOperationBancaire.SALAIRE); return o;
     }
     PieceCarteRapprochementDto piece(Long tenant, Long societe, String montant, LocalDate date, String nom) {
-        return new PieceCarteRapprochementDto(4L,tenant,societe,7L,"FA-4",date,LocalDate.of(2020,1,1),new BigDecimal(montant),nom,nom,"Pièce");
+        return new PieceCarteRapprochementDto(4L,tenant,societe,7L,"FA-4",date,LocalDate.of(2020,1,1),new BigDecimal(montant),nom,nom,"Pièce",date,new BigDecimal(montant));
     }
     PieceCarteRapprochementDto piece() { return piece(2L,3L,"40.00",LocalDate.of(2026,1,23),"Parking Madeleine"); }
+    @Test void fournisseursRetientJusquaTroisJoursSansComparerLeLibelle() {
+        var operation = op("Alias sans concordance");
+        operation.setTiersId(7L);
+        operation.setTypeOperation(TypeOperationBancaire.PAIEMENT_CB);
+        var proposition = RapprochementCarteMatcher.comparerFournisseurs(operation, piece()).orElseThrow();
+        assertThat(proposition.dateDepense()).isEqualTo(LocalDate.of(2026, 1, 23));
+        assertThat(proposition.montantRapproche()).isEqualByComparingTo("40");
+        operation.setDateOperation(LocalDate.of(2026, 1, 27));
+        assertThat(RapprochementCarteMatcher.comparerFournisseurs(operation, piece())).isEmpty();
+        operation.setDateOperation(LocalDate.of(2026, 1, 22));
+        assertThat(RapprochementCarteMatcher.comparerFournisseurs(operation, piece())).isEmpty();
+    }
+
+    @Test void fournisseursUtiliseLaDateFactureEtLeTtcAuChangementDAnnee() {
+        var operation = op("CARTE 20/12");
+        operation.setTiersId(7L);
+        operation.setTypeOperation(TypeOperationBancaire.PAIEMENT_CB);
+        operation.setDateOperation(LocalDate.of(2026, 1, 3));
+        var dateFacture = LocalDate.of(2025, 12, 31);
+        var piece = new PieceCarteRapprochementDto(4L, 2L, 3L, 7L, "FA-4", LocalDate.of(2025, 12, 20),
+                dateFacture, new BigDecimal("40"), "Tiers", "Nom", "Pièce", null, new BigDecimal("40"));
+        assertThat(RapprochementCarteMatcher.comparerFournisseurs(operation, piece)).isPresent();
+        operation.setDebit(new BigDecimal("39.99"));
+        assertThat(RapprochementCarteMatcher.comparerFournisseurs(operation, piece)).isEmpty();
+        operation.setTiersId(99L);
+        operation.setDebit(new BigDecimal("40"));
+        assertThat(RapprochementCarteMatcher.comparerFournisseurs(operation, piece)).isEmpty();
+    }
+
+    @Test void fournisseursBloqueDeuxOperationsOuDeuxFacturesCompatibles() {
+        var operation = op("CARTE");
+        operation.setTiersId(7L);
+        operation.setTypeOperation(TypeOperationBancaire.PAIEMENT_CB);
+        var autre = op("AUTRE CARTE");
+        org.springframework.test.util.ReflectionTestUtils.setField(autre, "id", 2L);
+        autre.setTiersId(7L);
+        autre.setTypeOperation(TypeOperationBancaire.PAIEMENT_CB);
+        var candidats = RapprochementCarteMatcher.propositionsFournisseurs(operation,
+                java.util.List.of(piece()), java.util.List.of(autre), java.util.List.of());
+        assertThat(candidats).singleElement().satisfies(candidat -> assertThat(candidat.ambiguite()).isTrue());
+        var date = LocalDate.of(2026, 1, 23);
+        var seconde = new PieceCarteRapprochementDto(5L, 2L, 3L, 7L, "FA-5", date, date, new BigDecimal("40"),
+                "Tiers", "Nom", "Pièce", date, new BigDecimal("40"));
+        assertThat(RapprochementCarteMatcher.propositionsFournisseurs(operation,
+                java.util.List.of(piece(), seconde), java.util.List.of(), java.util.List.of()))
+                .hasSize(2).allMatch(PropositionCarteDto::conflit);
+    }
+
     @Test void sansTiersEtDateComptabilisationDecalee() {
         var o=op("Paiement par carte PARKING MADELEIN PAR 23/01");
         var p=RapprochementCarteMatcher.comparer(o,piece()).orElseThrow();
