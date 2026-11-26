@@ -151,14 +151,15 @@ public class PaiementAchatRapprochementService {
             verrouillerPieceCarte(c, factureId);
             verifierReservationCarte(c, operationId, factureId);
             if (automatique) {
-                boolean recherchePieces = tiers.listerTiersActifs(c).stream()
-                        .anyMatch(t -> t.id().equals(op.getTiersId()) && !Boolean.FALSE.equals(t.actif())
-                                && !Boolean.TRUE.equals(t.pieceRapprochementAutorisee()));
-                if (!recherchePieces) throw erreur("CARTE_NON_ELIGIBLE", "L’autorisation du tiers a changé.");
+                var tiersCourant = tiers.listerTiersActifs(c).stream()
+                        .filter(t -> t.id().equals(op.getTiersId()) && !Boolean.FALSE.equals(t.actif())
+                                && !Boolean.TRUE.equals(t.pieceRapprochementAutorisee()))
+                        .findFirst().orElseThrow(() -> erreur("CARTE_NON_ELIGIBLE", "L’autorisation du tiers a changé."));
                 var autres = operations.findByTenantIdAndSocieteInterneIdAndActifTrueAndStatutRapprochementOrderByDateOperationDescIdDesc(
                         c.tenantId(), c.societeCouranteId(), StatutOperationBancaire.NON_RAPPROCHEE);
                 var traces = rapprochements.findByTenantIdAndSocieteInterneIdOrderByDateRapprochementDesc(c.tenantId(), c.societeCouranteId());
-                boolean certaine = RapprochementCarteMatcher.propositionsFournisseurs(op, factures.listerCartesOuvertes(c), autres, traces)
+                boolean certaine = RapprochementCarteMatcher.propositionsFournisseurs(op, factures.listerCartesOuvertes(c), autres, traces,
+                                tiersCourant.toleranceRapprochementJours())
                         .stream().anyMatch(p -> factureId.equals(p.factureId()) && !p.conflit() && montant.compareTo(p.montantRapproche()) == 0);
                 if (!certaine) throw erreur("CARTE_NON_ELIGIBLE", "La correspondance carte n’est plus certaine. Actualisez les propositions.");
             }

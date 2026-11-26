@@ -799,7 +799,7 @@ public class TresorerieService {
                     }
                     var idsCartes = idsCartesOuvertes;
                     if (carteEntreprise) {
-                        for (var carte : RapprochementCarteMatcher.propositionsFournisseurs(o, cartes, autresCartes, traces)) {
+                        for (var carte : RapprochementCarteMatcher.propositionsFournisseurs(o, cartes, autresCartes, traces, t.toleranceRapprochementJours())) {
                             var avertissements = carte.ambiguite()
                                     ? List.of("Plusieurs opérations ou pièces carte compatibles") : List.<String>of();
                             candidats.add(new Candidat("C:" + carte.factureId(), carte.tiersId(), carte.nomTiers(),
@@ -831,6 +831,17 @@ public class TresorerieService {
                             && ClassificationOperationBancaireService.roleFournisseur(roles)
                             && o.getTypeOperation()==TypeOperationBancaire.VIREMENT_EMIS
                             && autreFamilleAvecMontant(c, etape, t.id(), o.getDateOperation(), disponible, cache);
+                    Integer tolerance = boutonClientsFournisseurs ? t.toleranceRapprochementJours() : null;
+                    if (boutonClientsFournisseurs) {
+                        pieces.removeIf(f -> (f.contratId() != null || tolerance != null)
+                                && (!compatibleDateEtMontant(o, f, disponible, tolerance)
+                                    || !t.id().equals(f.tiersId())
+                                    || traces.stream().anyMatch(r -> r.getTypeFacture() == type
+                                            && f.id().equals(r.getFactureId())
+                                            && (r.getStatut() == StatutRapprochement.PROPOSE
+                                                || r.getStatut() == StatutRapprochement.VALIDE
+                                                    && o.getId().equals(r.getOperationBancaire().getId())))));
+                    }
                     for (var f:pieces) {
                         TypeFactureRapprochement typeCandidat = consultation && etape==Etape.SALAIRES && "ACHAT".equals(f.typeFacture())
                                 ? TypeFactureRapprochement.ACHAT : type;
@@ -848,10 +859,14 @@ public class TresorerieService {
                         criteres.add(exact ? "Montant restant exact" : "Affectation partielle ou plusieurs pièces à vérifier");
                         LocalDate date=RapprochementCarteMatcher.dateAchat(o.getLibelle(),o.getDateOperation());
                         LocalDate reference=date==null ? o.getDateOperation() : date;
-                        boolean proches=f.dateFacture()!=null && Math.abs(ChronoUnit.DAYS.between(reference,f.dateFacture()))<=7;
+                        boolean dateReglee = boutonClientsFournisseurs && (f.contratId() != null || tolerance != null);
+                        boolean proches = dateReglee || dateDansTolerance(reference, f.dateFacture(), 7);
                         criteres.add("Date d'achat : "+reference+" ; facture : "+f.dateFacture()+" ; échéance : "+f.dateEcheance());
                         boolean numero=f.numeroFacture()!=null && normaliserPourMatching(o.getLibelle()).contains(normaliserPourMatching(f.numeroFacture()));
                         if (numero) criteres.add("Référence de pièce présente dans le libellé");
+                        if (dateReglee) criteres.add(f.contratId() != null
+                                ? "Date bancaire proche de l’échéance contractuelle"
+                                : "Date bancaire dans la tolérance du tiers (±" + tolerance + " jours)");
                         if (!proches && typeCandidat!=TypeFactureRapprochement.SALAIRE) alertes.add("Dates éloignées : consulter le justificatif");
                         boolean ambigu=pieces.stream().filter(a -> a.resteAPayer().compareTo(disponible)==0).count()>1;
                         if (ambigu) alertes.add("Plusieurs pièces de même montant : aucun choix automatique");
@@ -891,14 +906,41 @@ public class TresorerieService {
                 .collect(Collectors.groupingBy(a -> a.typePiece()+":"+a.pieceId(), Collectors.counting()));
         lignes.replaceAll(l -> new Ligne(l.operation(),l.candidats().stream().map(a -> {
             boolean partage=a.pieceId()!=null && occurrencesPieces.getOrDefault(a.typePiece()+":"+a.pieceId(), 0L)>1;
-            if (!partage) return a;
-            var alertes=new ArrayList<>(a.avertissements());alertes.add("Pièce proposée sur plusieurs opérations : choix individuel requis");
+            var tiersOperation = parTiers.get(l.operation().tiersId());
+            boolean concurrenceCarteFacture = boutonClientsFournisseurs && tiersOperation != null
+                    && tiersOperation.toleranceRapprochementJours() != null && l.candidats().stream()
+                    .anyMatch(autre -> (a.carte() == null) != (autre.carte() == null)
+                            && a.montantDisponible().compareTo(autre.montantDisponible()) == 0);
+            if (!partage && !concurrenceCarteFacture) return a;
+            var alertes = new ArrayList<>(a.avertissements());
+            if (partage) alertes.add("Pièce proposée sur plusieurs opérations : choix individuel requis");
+            if (concurrenceCarteFacture) alertes.add("Une pièce carte et une facture correspondent au montant : choix individuel requis");
             return new Candidat(a.cle(),a.tiersId(),a.nomTiers(),a.typeTiers(),a.pieceId(),a.numeroPiece(),a.typePiece(),a.montantDisponible(),a.montantPropose(),a.datePiece(),a.dateEcheance(),false,a.criteres(),List.copyOf(alertes),a.natureProposee(),a.carte());
         }).toList(),l.anomalies(),l.bloquee()));
         int eligibles=(int)lignes.stream().filter(l -> !l.bloquee() && !l.candidats().isEmpty()).count();
         BigDecimal montant=lignes.stream().filter(l -> !l.bloquee() && !l.candidats().isEmpty()).map(l -> l.operation().debit()==null ? l.operation().montant().abs() : (l.operation().sens()==SensOperation.DEBIT ? l.operation().debit() : l.operation().credit())).reduce(BigDecimal.ZERO,BigDecimal::add);
         return new Apercu(e,categorie,scope.size(),eligibles,(int)toutes.stream().filter(a -> a.pieceId()!=null).map(a -> a.typePiece()+":"+a.pieceId()).distinct().count(),
             toutes.size(),(int)lignes.stream().filter(l -> !l.anomalies().isEmpty() || l.candidats().stream().anyMatch(a -> !a.avertissements().isEmpty())).count(),traitees,lignes.size(),montant,List.copyOf(lignes));
+    }
+
+    private boolean compatibleDateEtMontant(OperationBancaire operation, FactureOuverteRapprochementDto facture,
+            BigDecimal disponible, Integer tolerance) {
+        if (facture.contratId() != null) {
+            // Factures fournit l’échéance calculée à partir du contrat associé à cette facture.
+            return dateProcheEcheance(operation.getDateOperation(), facture.dateEcheance());
+        }
+        return tolerance != null && facture.montantTotal() != null && facture.montantTotal().compareTo(montantOperation(operation)) == 0
+                && disponible.signum() > 0 && disponible.compareTo(facture.resteAPayer()) == 0
+                && dateDansTolerance(operation.getDateOperation(), facture.dateFacture(), tolerance);
+    }
+
+    static boolean dateProcheEcheance(LocalDate dateBancaire, LocalDate echeance) {
+        return dateDansTolerance(dateBancaire, echeance, 7);
+    }
+
+    static boolean dateDansTolerance(LocalDate dateBancaire, LocalDate reference, int tolerance) {
+        return dateBancaire != null && reference != null
+                && Math.abs(ChronoUnit.DAYS.between(reference, dateBancaire)) <= tolerance;
     }
 
     private boolean autreFamilleAvecMontant(ContexteRequete c, Etape etape, Long tiersId, LocalDate date,
@@ -2417,7 +2459,7 @@ public class TresorerieService {
         if (achat!=null && facture.dateFacture()!=null) {
             long jours=Math.abs(ChronoUnit.DAYS.between(facture.dateFacture(),achat));
             if (jours==0) score+=35; else if (jours<=7) score+=25;
-        } else if (facture.dateEcheance()!=null && Math.abs(ChronoUnit.DAYS.between(facture.dateEcheance(),operation.getDateOperation()))<=7) score+=30;
+        } else if (dateProcheEcheance(operation.getDateOperation(), facture.dateEcheance())) score+=30;
         if (operation.getNatureOperation() == NatureOperationBancaire.SALAIRE
                 && facture.dateFacture() != null
                 && YearMonth.from(facture.dateFacture()).equals(periodeSalaireOperation(operation.getDateOperation()))) {

@@ -53,17 +53,17 @@ public final class RapprochementCarteMatcher {
     }
 
     static List<PropositionCarteDto> propositionsFournisseurs(OperationBancaire op,
-            List<PieceCarteRapprochementDto> pieces, List<OperationBancaire> operations, List<RapprochementBancaire> traces) {
+            List<PieceCarteRapprochementDto> pieces, List<OperationBancaire> operations, List<RapprochementBancaire> traces, Integer tolerance) {
         var compatibles = new LinkedHashMap<PieceCarteRapprochementDto, PropositionCarteDto>();
         for (var piece : pieces) {
-            comparerFournisseurs(op, piece).filter(p -> !reservee(op, piece.id(), traces))
+            comparerFournisseurs(op, piece, tolerance).filter(p -> !reservee(op, piece.id(), traces))
                     .ifPresent(p -> compatibles.put(piece, p));
         }
         return compatibles.entrySet().stream().map(candidat -> {
             var piece = candidat.getKey();
             boolean ambiguite = compatibles.size() > 1
                     || operations.stream().anyMatch(autre -> !Objects.equals(autre.getId(), op.getId())
-                            && comparerFournisseurs(autre, piece).isPresent()
+                            && comparerFournisseurs(autre, piece, tolerance).isPresent()
                             && !reservee(autre, piece.id(), traces));
             return candidat.getValue().avecConflits(ambiguite, ambiguite);
         }).toList();
@@ -75,8 +75,14 @@ public final class RapprochementCarteMatcher {
                     || r.getTypeFacture() == TypeFactureRapprochement.ACHAT && factureId.equals(r.getFactureId())));
     }
 
-    static Optional<PropositionCarteDto> comparerFournisseurs(OperationBancaire op, PieceCarteRapprochementDto piece) {
-        var date = piece.dateDepenseFiable() != null ? piece.dateDepenseFiable() : piece.datePiece();
+    static Optional<PropositionCarteDto> comparerFournisseurs(OperationBancaire op, PieceCarteRapprochementDto piece,
+            Integer tolerance) {
+        LocalDate dateFactureCarte = piece.dateDepenseFiable() != null ? piece.dateDepenseFiable() : piece.datePiece();
+        LocalDate date = piece.contratId() != null ? piece.dateEcheance() : tolerance != null ? piece.datePiece() : dateFactureCarte;
+        LocalDate dateBancaire = op.getDateOperation();
+        boolean dateCompatible = piece.contratId() != null ? TresorerieService.dateProcheEcheance(dateBancaire, date)
+                : tolerance != null ? TresorerieService.dateDansTolerance(dateBancaire, date, tolerance)
+                : date != null && dateBancaire != null && !dateBancaire.isBefore(date) && !dateBancaire.isAfter(date.plusDays(3));
         if (!op.isActif() || op.isRapprochee() || op.getSens() != SensOperation.DEBIT
                 || op.getTypeOperation() != TypeOperationBancaire.PAIEMENT_CB
                 || op.getStatutRapprochement() != StatutOperationBancaire.NON_RAPPROCHEE
@@ -84,16 +90,18 @@ public final class RapprochementCarteMatcher {
                 || !Objects.equals(op.getTenantId(), piece.tenantId())
                 || !Objects.equals(op.getSocieteInterneId(), piece.societeInterneId())
                 || op.getTiersId() == null || !op.getTiersId().equals(piece.tiersId())
-                || date == null || op.getDateOperation() == null || op.getDateOperation().isBefore(date)
-                || op.getDateOperation().isAfter(date.plusDays(3))
+                || !dateCompatible
                 || piece.montantTtc() == null || piece.montant() == null || piece.montantTtc().signum() <= 0
                 || piece.montantTtc().compareTo(montant(op)) != 0 || piece.montant().compareTo(piece.montantTtc()) != 0) {
             return Optional.empty();
         }
         return Optional.of(new PropositionCarteDto(op.getId(), piece.id(), piece.tiersId(), piece.numeroPiece(),
-                op.getLibelle(), piece.nomTiers(), op.getDateOperation(), null, date, montant(op),
+                op.getLibelle(), piece.nomTiers(), op.getDateOperation(), null, dateFactureCarte, montant(op),
                 piece.montantTtc(), piece.montantTtc(), BigDecimal.ZERO, false, true, false, false, false,
-                List.of("Tiers identifié et montant TTC exact", "Date bancaire comprise entre la date de référence et J+3")));
+                List.of("Tiers identifié et montant TTC exact", piece.contratId() != null
+                        ? "Date bancaire proche de l’échéance contractuelle"
+                        : tolerance != null ? "Date bancaire dans la tolérance du tiers (±" + tolerance + " jours)"
+                        : "Date bancaire comprise entre la date de référence et J+3")));
     }
 
     public static Optional<PropositionCarteDto> comparer(OperationBancaire op, PieceCarteRapprochementDto piece) {

@@ -11,12 +11,20 @@ public record TiersTresorerieDto(
         String nomNormalise,
         Boolean actif,
         Boolean pieceRapprochementAutorisee,
-        String nomCommercial, String enseigne, String siren, String siret, String tva
+        String nomCommercial, String enseigne, String siren, String siret, String tva,
+        Integer toleranceRapprochementJours
 ) {
     public TiersTresorerieDto(Long id, Set<String> roles, String raisonSociale, String nom, String prenom,
             String nomNormalise, Boolean actif, Boolean autorisee) {
-        this(id, roles, raisonSociale, nom, prenom, nomNormalise, actif, autorisee, null, null, null, null, null);
+        this(id, roles, raisonSociale, nom, prenom, nomNormalise, actif, autorisee, null, null, null, null, null, null);
     }
+    public TiersTresorerieDto(Long id, Set<String> roles, String raisonSociale, String nom, String prenom,
+            String nomNormalise, Boolean actif, Boolean autorisee,
+            String nomCommercial, String enseigne, String siren, String siret, String tva) {
+        this(id, roles, raisonSociale, nom, prenom, nomNormalise, actif, autorisee,
+                nomCommercial, enseigne, siren, siret, tva, null);
+    }
+
     public String libelle() {
         if (prenom != null && !prenom.isBlank() && nom != null && !nom.isBlank()) {
             return prenom.trim() + " " + nom.trim();

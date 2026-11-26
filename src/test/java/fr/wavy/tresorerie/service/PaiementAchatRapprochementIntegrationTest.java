@@ -988,6 +988,108 @@ class PaiementAchatRapprochementIntegrationTest {
                 .extracting(RapprochementBancaire::getModeRapprochement).containsExactly("ROLE_CARTE");
     }
 
+    @Test void fournisseurTolereLesBornesEtLeChangementDExercice() {
+        tiersAvecTolerance("FOURNISSEUR_GENERAL", 5, false);
+        var date = LocalDate.of(2025, 12, 29);
+        var facture = factureAvecDates(10L, "ACHAT", date, null, null, "100", "100");
+        var autreSolde = factureAvecDates(11L, "ACHAT", date, null, null, "100", "90");
+        var autreTtc = factureAvecDates(12L, "ACHAT", date, null, null, "110", "100");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.ACHAT, 7L))
+                .thenReturn(List.of(facture, autreSolde, autreTtc));
+        for (int jours : new int[] {-5, 5, -6, 6}) {
+            jdbc.update("update operation_bancaire set date_operation=? where id=?", date.plusDays(jours), op);
+            var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, consultation());
+            assertThat(apercu.lignes().get(0).candidats().stream().filter(Candidat::sur).map(Candidat::pieceId))
+                    .containsExactlyElementsOf(Math.abs(jours) == 5 ? List.of(10L) : List.of());
+        }
+        tiersAvecTolerance("FOURNISSEUR_GENERAL", 0, false);
+        jdbc.update("update operation_bancaire set date_operation=? where id=?", date, op);
+        assertThat(service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, consultation())
+                .lignes().get(0).candidats()).singleElement().satisfies(candidat -> assertThat(candidat.sur()).isTrue());
+        jdbc.update("update operation_bancaire set date_operation=? where id=?", date.plusDays(1), op);
+        assertThat(service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, consultation())
+                .lignes().get(0).candidats()).isEmpty();
+    }
+
+    @Test void fournisseurMixteUtiliseLEcheanceDuContratDeChaqueFacture() {
+        tiersAvecTolerance("FOURNISSEUR_GENERAL", 5, false);
+        var date = LocalDate.of(2026, 1, 15);
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.ACHAT, 7L)).thenReturn(List.of(
+                factureAvecDates(10L, "ACHAT", date, null, null, "100", "100"),
+                factureAvecDates(11L, "ACHAT", date, date.plusDays(30), 81L, "100", "100"),
+                factureAvecDates(12L, "ACHAT", date, date.plusDays(60), 82L, "100", "100")));
+        for (int[] exemple : new int[][] {{5, 10}, {30, 11}, {60, 12}}) {
+            jdbc.update("update operation_bancaire set date_operation=? where id=?", date.plusDays(exemple[0]), op);
+            assertThat(service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, consultation()).lignes().get(0).candidats())
+                    .singleElement().satisfies(candidat -> {
+                        assertThat(candidat.pieceId()).isEqualTo((long) exemple[1]);
+                        assertThat(candidat.sur()).isTrue();
+                    });
+        }
+    }
+
+    @Test void clientAvecToleranceNeProposePasDeChoixCertainQuandDeuxVentesCorrespondent() {
+        tiersAvecTolerance("CLIENT", 5, false);
+        var date = LocalDate.of(2026, 1, 30);
+        jdbc.update("""
+                update operation_bancaire set sens='CREDIT',debit=0,credit=100,montant=100,
+                type_tiers_reconnu='CLIENT',type_operation='VIREMENT_RECU',nature_operation='FACTURE_CLIENT' where id=?
+                """, op);
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.VENTE, 7L)).thenReturn(List.of(
+                factureAvecDates(10L, "VENTE", date, null, null, "100", "100"),
+                factureAvecDates(11L, "VENTE", date.plusDays(1), null, null, "100", "100")));
+        assertThat(service.previsualiserAssistant(c, Etape.CLIENTS, null, consultation()).lignes().get(0).candidats())
+                .hasSize(2).noneMatch(Candidat::sur);
+        verify(factures, never()).enregistrerPaiement(any(), any(), anyLong(), any());
+    }
+
+    @Test void pieceInterneAutoriseeIgnoreLaToleranceEtLaRechercheDeFactures() {
+        impotAutorise();
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(new TiersTresorerieDto(
+                59L, Set.of("ORGANISME_FISCAL"), "Impôt", null, null, null, true, true,
+                null, null, null, null, null, 0)));
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, consultation());
+        assertThat(apercu.lignes().get(0).candidats()).extracting(Candidat::cle).containsExactly("CREATION_SANS_JUSTIFICATIF");
+        verifyNoInteractions(factures);
+    }
+
+    @Test void confirmationCarteReverifieLaToleranceDuTiers() {
+        tiersAvecTolerance("MARCHAND", 5, false);
+        jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB' where id=?", op);
+        var dateFacture = LocalDate.of(2026, 2, 6);
+        var ttc = new BigDecimal("100.00");
+        when(factures.listerCartesOuvertes(c)).thenReturn(List.of(new PieceCarteRapprochementDto(
+                10L, c.tenantId(), c.societeCouranteId(), 7L, "FA-10", dateFacture, dateFacture,
+                ttc, "Marchand", "Marchand", "Carte", dateFacture, ttc)));
+        var achat = new FactureOuverteRapprochementDto(10L, "ACHAT", 7L, "FA-10", dateFacture, null,
+                ttc, "Carte", "Marchand", ttc, "NON_PAYEE", "DEPENSE_CARTE_ENTREPRISE");
+        when(factures.listerFacturesOuvertes(c, TypeFactureRapprochement.ACHAT, 7L)).thenReturn(List.of(achat));
+        var p = consultation();
+        var apercu = service.previsualiserAssistant(c, Etape.FOURNISSEURS, null, p);
+        assertThat(apercu.lignes().get(0).candidats()).singleElement().satisfies(candidat -> assertThat(candidat.sur()).isTrue());
+        var demande = new Confirmation(Etape.FOURNISSEURS, p, null, true, List.of(choisir(apercu, 0, false)));
+
+        tiersAvecTolerance("MARCHAND", 4, false);
+        assertThat(service.confirmerAssistant(c, demande).reussis()).isZero();
+        verify(factures, never()).enregistrerPaiement(any(), any(), anyLong(), any());
+
+        tiersAvecTolerance("MARCHAND", 5, false);
+        assertThat(service.confirmerAssistant(c, demande).reussis()).isOne();
+        verify(factures).enregistrerPaiement(eq(c), eq(TypeFactureRapprochement.ACHAT), eq(10L), any());
+    }
+
+    private void tiersAvecTolerance(String role, Integer tolerance, boolean autorisee) {
+        when(tiers.listerTiersActifs(c)).thenReturn(List.of(new TiersTresorerieDto(
+                7L, Set.of(role), "Tiers test", null, null, null, true, autorisee,
+                null, null, null, null, null, tolerance)));
+    }
+
+    private FactureOuverteRapprochementDto factureAvecDates(Long id, String type, LocalDate date,
+            LocalDate echeance, Long contratId, String ttc, String reste) {
+        return new FactureOuverteRapprochementDto(id, type, 7L, "FA-" + id, date, echeance, new BigDecimal(reste),
+                "Facture", "Tiers test", new BigDecimal(ttc), "NON_PAYEE", "FACTURE", contratId);
+    }
+
     @Test void carteFournisseursConfirmeLeTtcAJPlusTroisAvecLeParcoursExistant() {
         tiersAssistant(7L, "Marchand", "MARCHAND", false, null);
         jdbc.update("update operation_bancaire set type_operation='PAIEMENT_CB', libelle='CB ALIAS 20/01', date_operation='2026-01-26' where id=?", op);
